@@ -209,47 +209,150 @@ fn get_href_from_selectors(html: &Html, selectors: &[&str]) -> String {
     String::new()
 }
 
+fn extract_newegg_categories(html: &str, base_url: &str) -> Vec<String> {
+    let document = Html::parse_document(html);
+    let mut categories = Vec::new();
+    
+    // Look for category links in Newegg's navigation
+    let category_selectors = [
+        "a[href*='/Category/']",
+        "a[href*='/SubCategory/']",
+        ".nav-category a",
+        ".menu-list a",
+        "[class*='category'] a",
+    ];
+    
+    for selector_str in &category_selectors {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            for element in document.select(&selector) {
+                if let Some(href) = element.value().attr("href") {
+                    let full_url = if href.starts_with("http") {
+                        href.to_string()
+                    } else if href.starts_with("//") {
+                        format!("https:{}", href)
+                    } else if href.starts_with('/') {
+                        format!("{}{}", base_url, href)
+                    } else {
+                        continue;
+                    };
+                    
+                    // Only add Newegg category URLs
+                    if full_url.contains("newegg.com") && 
+                       (full_url.contains("/Category/") || full_url.contains("/SubCategory/")) {
+                        if !categories.contains(&full_url) {
+                            categories.push(full_url);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    categories
+}
+
 async fn scrape_newegg(client: &reqwest::Client) -> Vec<Product> {
     let mut all_products = Vec::new();
+    let base_url = "https://www.newegg.com";
     
-    // Scrape different Newegg category pages for products
-    let urls = [
-        "https://www.newegg.com/GPUs-Video-Graphics-Cards/Category/ID-38",
-        "https://www.newegg.com/CPUs-Processors/Category/ID-34", 
-        "https://www.newegg.com/Desktop-Memory/Category/ID-147",
-    ];
-
-    for url in &urls {
-        println!("  Fetching: {}", url);
+    // First, fetch the main page to get all category links
+    println!("  Fetching main page to discover categories...");
+    let categories = if let Some(html) = fetch_html(client, base_url).await {
+        let cats = extract_newegg_categories(&html, base_url);
+        println!("  Found {} categories", cats.len());
+        cats
+    } else {
+        Vec::new()
+    };
+    
+    sleep(Duration::from_millis(1000)).await;
+    
+    // Limit to first 10 categories to avoid overwhelming the server
+    let max_categories = 10;
+    let categories_to_scrape: Vec<_> = categories.into_iter().take(max_categories).collect();
+    
+    for (i, url) in categories_to_scrape.iter().enumerate() {
+        println!("  [{}/{}] Fetching: {}", i + 1, categories_to_scrape.len(), url);
         if let Some(html) = fetch_html(client, url).await {
-            let products = scrape_newegg_products(&html, "https://www.newegg.com");
-            println!("  Found {} products", products.len());
+            let products = scrape_newegg_products(&html, base_url);
+            println!("    Found {} products", products.len());
             all_products.extend(products);
         }
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_millis(1500)).await;
     }
 
     all_products
 }
 
+fn extract_swappa_categories(html: &str, base_url: &str) -> Vec<String> {
+    let document = Html::parse_document(html);
+    let mut categories = Vec::new();
+    
+    // Look for category links in Swappa's navigation
+    let category_selectors = [
+        "a[href*='/buy/']",
+        "a[href*='/sell/']",
+        ".nav a",
+        ".menu a",
+        "[class*='category'] a",
+        "[class*='nav'] a",
+    ];
+    
+    for selector_str in &category_selectors {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            for element in document.select(&selector) {
+                if let Some(href) = element.value().attr("href") {
+                    let full_url = if href.starts_with("http") {
+                        href.to_string()
+                    } else if href.starts_with('/') {
+                        format!("{}{}", base_url, href)
+                    } else {
+                        continue;
+                    };
+                    
+                    // Only add Swappa buy category URLs
+                    if full_url.contains("swappa.com") && full_url.contains("/buy/") {
+                        // Skip listing pages, only get category pages
+                        if !full_url.contains("/listing/") && !categories.contains(&full_url) {
+                            categories.push(full_url);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    categories
+}
+
 async fn scrape_swappa(client: &reqwest::Client) -> Vec<Product> {
     let mut all_products = Vec::new();
+    let base_url = "https://swappa.com";
     
-    // Scrape Swappa category pages
-    let urls = [
-        "https://swappa.com/buy/iphones",
-        "https://swappa.com/buy/macbooks",
-        "https://swappa.com/buy/samsung-phones",
-    ];
-
-    for url in &urls {
-        println!("  Fetching: {}", url);
+    // First, fetch the main page to get all category links
+    println!("  Fetching main page to discover categories...");
+    let categories = if let Some(html) = fetch_html(client, base_url).await {
+        let cats = extract_swappa_categories(&html, base_url);
+        println!("  Found {} categories", cats.len());
+        cats
+    } else {
+        Vec::new()
+    };
+    
+    sleep(Duration::from_millis(1000)).await;
+    
+    // Limit to first 10 categories to avoid overwhelming the server
+    let max_categories = 10;
+    let categories_to_scrape: Vec<_> = categories.into_iter().take(max_categories).collect();
+    
+    for (i, url) in categories_to_scrape.iter().enumerate() {
+        println!("  [{}/{}] Fetching: {}", i + 1, categories_to_scrape.len(), url);
         if let Some(html) = fetch_html(client, url).await {
-            let products = scrape_swappa_products(&html, "https://swappa.com");
-            println!("  Found {} products", products.len());
+            let products = scrape_swappa_products(&html, base_url);
+            println!("    Found {} products", products.len());
             all_products.extend(products);
         }
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_millis(1500)).await;
     }
 
     all_products
