@@ -11,6 +11,19 @@ struct Product {
     source: String,
 }
 
+#[derive(Debug, Clone)]
+struct ProductDetails {
+    name: String,
+    price: String,
+    url: String,
+    source: String,
+    description: String,
+    specs: Vec<String>,
+    images: Vec<String>,
+    condition: String,
+    seller: String,
+}
+
 async fn fetch_html(client: &reqwest::Client, url: &str) -> Option<String> {
     let response = client
         .get(url)
@@ -209,6 +222,234 @@ fn get_href_from_selectors(html: &Html, selectors: &[&str]) -> String {
     String::new()
 }
 
+// Parse detailed info from a Newegg product page
+fn parse_newegg_product_page(html: &str, url: &str) -> ProductDetails {
+    let document = Html::parse_document(html);
+    
+    // Get product name
+    let name = get_text_from_selectors(&document, &[
+        "h1.product-title",
+        ".product-title",
+        "h1[class*='title']",
+        "h1",
+    ]);
+    
+    // Get price
+    let price = get_text_from_selectors(&document, &[
+        ".price-current",
+        ".product-price .price-current",
+        "[class*='price'] strong",
+        ".price",
+    ]);
+    
+    // Get description
+    let description = get_text_from_selectors(&document, &[
+        ".product-bullets",
+        ".product-description",
+        "#product-details",
+        "[class*='description']",
+    ]);
+    
+    // Get specs
+    let mut specs = Vec::new();
+    let spec_selectors = [
+        ".tab-pane table tr",
+        ".product-specs tr",
+        ".spec-table tr",
+    ];
+    for selector_str in &spec_selectors {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            for row in document.select(&selector) {
+                let text: String = row.text().collect::<Vec<_>>().join(" ");
+                let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !cleaned.is_empty() && cleaned.len() > 3 {
+                    specs.push(cleaned);
+                }
+            }
+        }
+        if !specs.is_empty() {
+            break;
+        }
+    }
+    
+    // Get images
+    let mut images = Vec::new();
+    let img_selectors = [
+        ".product-view-gallery img",
+        ".swiper-slide img",
+        ".product-image img",
+        "img[src*='productImage']",
+    ];
+    for selector_str in &img_selectors {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            for img in document.select(&selector) {
+                if let Some(src) = img.value().attr("src").or_else(|| img.value().attr("data-src")) {
+                    let img_url = if src.starts_with("//") {
+                        format!("https:{}", src)
+                    } else {
+                        src.to_string()
+                    };
+                    if !images.contains(&img_url) {
+                        images.push(img_url);
+                    }
+                }
+            }
+        }
+        if !images.is_empty() {
+            break;
+        }
+    }
+    
+    // Get seller info
+    let seller = get_text_from_selectors(&document, &[
+        ".product-seller",
+        ".seller-name",
+        "[class*='seller']",
+    ]);
+    
+    ProductDetails {
+        name: if name.is_empty() { "Unknown".to_string() } else { name.trim().to_string() },
+        price: if price.is_empty() { "Price not found".to_string() } else { price.trim().to_string() },
+        url: url.to_string(),
+        source: "Newegg".to_string(),
+        description: description.trim().to_string(),
+        specs: specs.into_iter().take(10).collect(), // Limit specs
+        images: images.into_iter().take(5).collect(), // Limit images
+        condition: "New".to_string(),
+        seller: if seller.is_empty() { "Unknown".to_string() } else { seller.trim().to_string() },
+    }
+}
+
+// Parse detailed info from a Swappa product page
+fn parse_swappa_product_page(html: &str, url: &str) -> ProductDetails {
+    let document = Html::parse_document(html);
+    
+    // Get product name
+    let name = get_text_from_selectors(&document, &[
+        "h1.listing-title",
+        ".listing-title",
+        "h1[class*='title']",
+        "h1",
+    ]);
+    
+    // Get price
+    let price = get_text_from_selectors(&document, &[
+        ".listing-price",
+        ".price-tag",
+        "[class*='price']",
+    ]);
+    
+    // Get description
+    let description = get_text_from_selectors(&document, &[
+        ".listing-description",
+        ".description-text",
+        "[class*='description']",
+    ]);
+    
+    // Get condition
+    let condition = get_text_from_selectors(&document, &[
+        ".listing-condition",
+        ".condition-badge",
+        "[class*='condition']",
+    ]);
+    
+    // Get specs/details
+    let mut specs = Vec::new();
+    let spec_selectors = [
+        ".listing-specs li",
+        ".device-specs li",
+        ".spec-list li",
+        ".listing-details li",
+    ];
+    for selector_str in &spec_selectors {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            for item in document.select(&selector) {
+                let text: String = item.text().collect::<Vec<_>>().join(" ");
+                let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !cleaned.is_empty() && cleaned.len() > 2 {
+                    specs.push(cleaned);
+                }
+            }
+        }
+        if !specs.is_empty() {
+            break;
+        }
+    }
+    
+    // Get images
+    let mut images = Vec::new();
+    let img_selectors = [
+        ".listing-gallery img",
+        ".listing-images img",
+        ".carousel img",
+        "img[class*='listing']",
+    ];
+    for selector_str in &img_selectors {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            for img in document.select(&selector) {
+                if let Some(src) = img.value().attr("src").or_else(|| img.value().attr("data-src")) {
+                    if !images.contains(&src.to_string()) {
+                        images.push(src.to_string());
+                    }
+                }
+            }
+        }
+        if !images.is_empty() {
+            break;
+        }
+    }
+    
+    // Get seller
+    let seller = get_text_from_selectors(&document, &[
+        ".seller-name",
+        ".listing-seller",
+        "[class*='seller'] a",
+    ]);
+    
+    ProductDetails {
+        name: if name.is_empty() { "Unknown".to_string() } else { name.trim().to_string() },
+        price: if price.is_empty() { "Price not found".to_string() } else { price.trim().to_string() },
+        url: url.to_string(),
+        source: "Swappa".to_string(),
+        description: description.trim().to_string(),
+        specs: specs.into_iter().take(10).collect(),
+        images: images.into_iter().take(5).collect(),
+        condition: if condition.is_empty() { "Unknown".to_string() } else { condition.trim().to_string() },
+        seller: if seller.is_empty() { "Unknown".to_string() } else { seller.trim().to_string() },
+    }
+}
+
+// Fetch detailed info for a list of products by visiting each product page
+async fn fetch_product_details(client: &reqwest::Client, products: &[Product], max_items: usize) -> Vec<ProductDetails> {
+    let mut details = Vec::new();
+    
+    let products_to_fetch: Vec<_> = products.iter()
+        .filter(|p| !p.url.is_empty() && p.url.starts_with("http"))
+        .take(max_items)
+        .collect();
+    
+    println!("\n  📋 Fetching detailed info for {} products...\n", products_to_fetch.len());
+    
+    for (i, product) in products_to_fetch.iter().enumerate() {
+        println!("    [{}/{}] Fetching details: {}", i + 1, products_to_fetch.len(), 
+            if product.name.len() > 50 { &product.name[..50] } else { &product.name });
+        
+        if let Some(html) = fetch_html(client, &product.url).await {
+            let detail = match product.source.as_str() {
+                "Newegg" => parse_newegg_product_page(&html, &product.url),
+                "Swappa" => parse_swappa_product_page(&html, &product.url),
+                _ => continue,
+            };
+            details.push(detail);
+        }
+        
+        // Rate limiting - be respectful to servers
+        sleep(Duration::from_millis(2000)).await;
+    }
+    
+    details
+}
+
 fn extract_newegg_categories(html: &str, base_url: &str) -> Vec<String> {
     let document = Html::parse_document(html);
     let mut categories = Vec::new();
@@ -382,6 +623,35 @@ async fn main() {
         println!("   🔗 {}", product.url);
     }
 
+    // Fetch detailed info for Newegg products
+    let newegg_details = fetch_product_details(&client, &newegg_products, 5).await;
+    
+    println!("\n{}", "=".repeat(60));
+    println!("📦 NEWEGG DETAILED PRODUCTS ({})", newegg_details.len());
+    println!("{}", "=".repeat(60));
+    
+    for (i, detail) in newegg_details.iter().enumerate() {
+        println!("\n{}. {}", i + 1, detail.name);
+        println!("   💰 Price: {}", detail.price);
+        println!("   📝 Description: {}", if detail.description.len() > 100 { 
+            format!("{}...", &detail.description[..100]) 
+        } else { 
+            detail.description.clone() 
+        });
+        println!("   🏷️  Condition: {}", detail.condition);
+        println!("   👤 Seller: {}", detail.seller);
+        if !detail.specs.is_empty() {
+            println!("   📋 Specs ({}):", detail.specs.len());
+            for spec in detail.specs.iter().take(3) {
+                println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+            }
+        }
+        if !detail.images.is_empty() {
+            println!("   🖼️  Images: {}", detail.images.len());
+        }
+        println!("   🔗 {}", detail.url);
+    }
+
     sleep(Duration::from_millis(2000)).await;
 
     // Scrape Swappa
@@ -398,13 +668,45 @@ async fn main() {
         println!("   🔗 {}", product.url);
     }
 
+    // Fetch detailed info for Swappa products
+    let swappa_details = fetch_product_details(&client, &swappa_products, 5).await;
+    
+    println!("\n{}", "=".repeat(60));
+    println!("📱 SWAPPA DETAILED PRODUCTS ({})", swappa_details.len());
+    println!("{}", "=".repeat(60));
+    
+    for (i, detail) in swappa_details.iter().enumerate() {
+        println!("\n{}. {}", i + 1, detail.name);
+        println!("   💰 Price: {}", detail.price);
+        println!("   📝 Description: {}", if detail.description.len() > 100 { 
+            format!("{}...", &detail.description[..100]) 
+        } else { 
+            detail.description.clone() 
+        });
+        println!("   🏷️  Condition: {}", detail.condition);
+        println!("   👤 Seller: {}", detail.seller);
+        if !detail.specs.is_empty() {
+            println!("   📋 Specs ({}):", detail.specs.len());
+            for spec in detail.specs.iter().take(3) {
+                println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+            }
+        }
+        if !detail.images.is_empty() {
+            println!("   🖼️  Images: {}", detail.images.len());
+        }
+        println!("   🔗 {}", detail.url);
+    }
+
     // Summary
     println!("\n\n{}", "=".repeat(60));
     println!("📊 SUMMARY");
     println!("{}", "=".repeat(60));
     println!("Newegg products found: {}", newegg_products.len());
+    println!("Newegg detailed: {}", newegg_details.len());
     println!("Swappa products found: {}", swappa_products.len());
+    println!("Swappa detailed: {}", swappa_details.len());
     println!("Total products: {}", newegg_products.len() + swappa_products.len());
+    println!("Total detailed: {}", newegg_details.len() + swappa_details.len());
 }
 
 
