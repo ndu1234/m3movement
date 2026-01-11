@@ -821,107 +821,123 @@ async fn main() {
         .build()
         .expect("Failed to create HTTP client");
 
-    println!("🛒 Product Scraper - Newegg & Swappa\n");
-    println!("{}", "=".repeat(60));
+    println!("🛒 Product Scraper - Newegg & Swappa");
+    println!("⏰ Running every 1 minute. Press Ctrl+C to stop.\n");
+    
+    let mut run_count = 0;
+    
+    loop {
+        run_count += 1;
+        let now = chrono::Local::now();
+        
+        println!("\n{}", "=".repeat(60));
+        println!("🔄 SCRAPE RUN #{} - {}", run_count, now.format("%Y-%m-%d %H:%M:%S"));
+        println!("{}", "=".repeat(60));
 
-    // Scrape Newegg
-    println!("\n📦 Scraping Newegg...\n");
-    let newegg_products = scrape_newegg(&client).await;
-    
-    println!("\n{}", "-".repeat(60));
-    println!("NEWEGG PRODUCTS ({})", newegg_products.len());
-    println!("{}", "-".repeat(60));
-    
-    for (i, product) in newegg_products.iter().take(15).enumerate() {
-        println!("\n{}. {}", i + 1, product.name);
-        println!("   💰 Price: {}", product.price);
-        println!("   🔗 {}", product.url);
-    }
+        // Scrape Newegg
+        println!("\n📦 Scraping Newegg...\n");
+        let newegg_products = scrape_newegg(&client).await;
+        
+        println!("\n{}", "-".repeat(60));
+        println!("NEWEGG PRODUCTS ({})", newegg_products.len());
+        println!("{}", "-".repeat(60));
+        
+        for (i, product) in newegg_products.iter().take(15).enumerate() {
+            println!("\n{}. {}", i + 1, product.name);
+            println!("   💰 Price: {}", product.price);
+            println!("   🔗 {}", product.url);
+        }
 
-    // Fetch detailed info for Newegg products
-    let newegg_details = fetch_product_details(&client, &newegg_products, 5).await;
-    
-    println!("\n{}", "=".repeat(60));
-    println!("📦 NEWEGG DETAILED PRODUCTS ({})", newegg_details.len());
-    println!("{}", "=".repeat(60));
-    
-    for (i, detail) in newegg_details.iter().enumerate() {
-        println!("\n{}. {}", i + 1, detail.name);
-        println!("   💰 Price: {}", detail.price);
-        println!("   📝 Description: {}", if detail.description.len() > 100 { 
-            format!("{}...", &detail.description[..100]) 
-        } else { 
-            detail.description.clone() 
-        });
-        println!("   🏷️  Condition: {}", detail.condition);
-        println!("   👤 Seller: {}", detail.seller);
-        if !detail.specs.is_empty() {
-            println!("   📋 Specs ({}):", detail.specs.len());
-            for spec in detail.specs.iter().take(3) {
-                println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+        // Fetch detailed info for Newegg products
+        let newegg_details = fetch_product_details(&client, &newegg_products, 5).await;
+        
+        println!("\n{}", "=".repeat(60));
+        println!("📦 NEWEGG DETAILED PRODUCTS ({})", newegg_details.len());
+        println!("{}", "=".repeat(60));
+        
+        for (i, detail) in newegg_details.iter().enumerate() {
+            println!("\n{}. {}", i + 1, detail.name);
+            println!("   💰 Price: {}", detail.price);
+            println!("   📝 Description: {}", if detail.description.len() > 100 { 
+                format!("{}...", &detail.description[..100]) 
+            } else { 
+                detail.description.clone() 
+            });
+            println!("   🏷️  Condition: {}", detail.condition);
+            println!("   👤 Seller: {}", detail.seller);
+            if !detail.specs.is_empty() {
+                println!("   📋 Specs ({}):", detail.specs.len());
+                for spec in detail.specs.iter().take(3) {
+                    println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+                }
             }
-        }
-        if !detail.images.is_empty() {
-            println!("   🖼️  Images: {}", detail.images.len());
-        }
-        println!("   🔗 {}", detail.url);
-    }
-
-    sleep(Duration::from_millis(2000)).await;
-
-    // Scrape Swappa
-    println!("\n\n📱 Scraping Swappa...\n");
-    let swappa_products = scrape_swappa(&client).await;
-    
-    println!("\n{}", "-".repeat(60));
-    println!("SWAPPA PRODUCTS ({})", swappa_products.len());
-    println!("{}", "-".repeat(60));
-    
-    for (i, product) in swappa_products.iter().take(15).enumerate() {
-        println!("\n{}. {}", i + 1, product.name);
-        println!("   💰 Price: {}", product.price);
-        println!("   🔗 {}", product.url);
-    }
-
-    // Fetch detailed info for Swappa products using Selenium
-    let swappa_details = fetch_swappa_details_selenium(&swappa_products, 5).await;
-    
-    println!("\n{}", "=".repeat(60));
-    println!("📱 SWAPPA DETAILED PRODUCTS ({})", swappa_details.len());
-    println!("{}", "=".repeat(60));
-    
-    for (i, detail) in swappa_details.iter().enumerate() {
-        println!("\n{}. {}", i + 1, detail.name);
-        println!("   💰 Price: {}", detail.price);
-        println!("   📝 Description: {}", if detail.description.len() > 100 { 
-            format!("{}...", &detail.description[..100]) 
-        } else { 
-            detail.description.clone() 
-        });
-        println!("   🏷️  Condition: {}", detail.condition);
-        println!("   👤 Seller: {}", detail.seller);
-        if !detail.specs.is_empty() {
-            println!("   📋 Specs ({}):", detail.specs.len());
-            for spec in detail.specs.iter().take(3) {
-                println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+            if !detail.images.is_empty() {
+                println!("   🖼️  Images: {}", detail.images.len());
             }
+            println!("   🔗 {}", detail.url);
         }
-        if !detail.images.is_empty() {
-            println!("   🖼️  Images: {}", detail.images.len());
-        }
-        println!("   🔗 {}", detail.url);
-    }
 
-    // Summary
-    println!("\n\n{}", "=".repeat(60));
-    println!("📊 SUMMARY");
-    println!("{}", "=".repeat(60));
-    println!("Newegg products found: {}", newegg_products.len());
-    println!("Newegg detailed: {}", newegg_details.len());
-    println!("Swappa products found: {}", swappa_products.len());
-    println!("Swappa detailed: {}", swappa_details.len());
-    println!("Total products: {}", newegg_products.len() + swappa_products.len());
-    println!("Total detailed: {}", newegg_details.len() + swappa_details.len());
+        sleep(Duration::from_millis(2000)).await;
+
+        // Scrape Swappa
+        println!("\n\n📱 Scraping Swappa...\n");
+        let swappa_products = scrape_swappa(&client).await;
+        
+        println!("\n{}", "-".repeat(60));
+        println!("SWAPPA PRODUCTS ({})", swappa_products.len());
+        println!("{}", "-".repeat(60));
+        
+        for (i, product) in swappa_products.iter().take(15).enumerate() {
+            println!("\n{}. {}", i + 1, product.name);
+            println!("   💰 Price: {}", product.price);
+            println!("   🔗 {}", product.url);
+        }
+
+        // Fetch detailed info for Swappa products using Selenium
+        let swappa_details = fetch_swappa_details_selenium(&swappa_products, 5).await;
+        
+        println!("\n{}", "=".repeat(60));
+        println!("📱 SWAPPA DETAILED PRODUCTS ({})", swappa_details.len());
+        println!("{}", "=".repeat(60));
+        
+        for (i, detail) in swappa_details.iter().enumerate() {
+            println!("\n{}. {}", i + 1, detail.name);
+            println!("   💰 Price: {}", detail.price);
+            println!("   📝 Description: {}", if detail.description.len() > 100 { 
+                format!("{}...", &detail.description[..100]) 
+            } else { 
+                detail.description.clone() 
+            });
+            println!("   🏷️  Condition: {}", detail.condition);
+            println!("   👤 Seller: {}", detail.seller);
+            if !detail.specs.is_empty() {
+                println!("   📋 Specs ({}):", detail.specs.len());
+                for spec in detail.specs.iter().take(3) {
+                    println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+                }
+            }
+            if !detail.images.is_empty() {
+                println!("   🖼️  Images: {}", detail.images.len());
+            }
+            println!("   🔗 {}", detail.url);
+        }
+
+        // Summary
+        println!("\n\n{}", "=".repeat(60));
+        println!("📊 SUMMARY - Run #{}", run_count);
+        println!("{}", "=".repeat(60));
+        println!("Newegg products found: {}", newegg_products.len());
+        println!("Newegg detailed: {}", newegg_details.len());
+        println!("Swappa products found: {}", swappa_products.len());
+        println!("Swappa detailed: {}", swappa_details.len());
+        println!("Total products: {}", newegg_products.len() + swappa_products.len());
+        println!("Total detailed: {}", newegg_details.len() + swappa_details.len());
+        
+        // Wait 1 minute before next scrape
+        println!("\n⏳ Next scrape in 60 seconds...");
+        println!("   Press Ctrl+C to stop.");
+        sleep(Duration::from_secs(60)).await;
+    }
 }
 
 // Fetch Swappa product details using Selenium (since regular HTTP doesn't work)
