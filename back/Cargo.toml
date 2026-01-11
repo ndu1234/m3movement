@@ -7,4 +7,7 @@ edition = "2024"
 reqwest = { version = "0.11", features = ["json"] }
 scraper = "0.18"
 tokio = { version = "1", features = ["full"] }
+thirtyfour = "0.32"
+image = "0.24"
+base64 = "0.21"
 

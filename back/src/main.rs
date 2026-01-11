@@ -1,7 +1,9 @@
 use reqwest::header::USER_AGENT;
 use scraper::{Html, Selector};
 use std::time::Duration;
+use std::fs;
 use tokio::time::sleep;
+use thirtyfour::prelude::*;
 
 #[derive(Debug, Clone)]
 struct Product {
@@ -566,36 +568,249 @@ fn extract_swappa_categories(html: &str, base_url: &str) -> Vec<String> {
     categories
 }
 
-async fn scrape_swappa(client: &reqwest::Client) -> Vec<Product> {
+async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
     let mut all_products = Vec::new();
-    let base_url = "https://swappa.com";
     
-    // First, fetch the main page to get all category links
-    println!("  Fetching main page to discover categories...");
-    let categories = if let Some(html) = fetch_html(client, base_url).await {
-        let cats = extract_swappa_categories(&html, base_url);
-        println!("  Found {} categories", cats.len());
-        cats
-    } else {
-        Vec::new()
+    println!("  Starting Selenium WebDriver for Swappa...");
+    
+    // Set up Chrome options - headless mode to run without visible browser
+    let mut caps = DesiredCapabilities::chrome();
+    caps.add_arg("--headless=new").ok();
+    caps.add_arg("--disable-gpu").ok();
+    caps.add_arg("--no-sandbox").ok();
+    caps.add_arg("--disable-dev-shm-usage").ok();
+    caps.add_arg("--window-size=1920,1200").ok();
+    caps.add_arg("--disable-blink-features=AutomationControlled").ok();
+    caps.add_arg("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36").ok();
+    
+    // Connect to ChromeDriver
+    let driver = match WebDriver::new("http://localhost:9515", caps).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("  ❌ Failed to connect to ChromeDriver: {}", e);
+            eprintln!("  💡 Make sure ChromeDriver is running: chromedriver --port=9515");
+            return all_products;
+        }
     };
     
-    sleep(Duration::from_millis(1000)).await;
+    println!("  ✓ Connected to ChromeDriver");
     
-    // Limit to first 10 categories to avoid overwhelming the server
-    let max_categories = 10;
-    let categories_to_scrape: Vec<_> = categories.into_iter().take(max_categories).collect();
+    // Create screenshots directory
+    let screenshot_dir = "/tmp/swappa_screenshots";
+    let _ = fs::create_dir_all(screenshot_dir);
     
-    for (i, url) in categories_to_scrape.iter().enumerate() {
-        println!("  [{}/{}] Fetching: {}", i + 1, categories_to_scrape.len(), url);
-        if let Some(html) = fetch_html(client, url).await {
-            let products = scrape_swappa_products(&html, base_url);
-            println!("    Found {} products", products.len());
-            all_products.extend(products);
+    // URLs to scrape - these are specific device pages with listings
+    let urls: Vec<(&str, &str)> = vec![
+        ("iPhone 15", "https://swappa.com/buy/apple-iphone-15"),
+        ("iPhone 14", "https://swappa.com/buy/apple-iphone-14"),
+        ("iPhone 13", "https://swappa.com/buy/apple-iphone-13"),
+        ("Galaxy S24", "https://swappa.com/buy/samsung-galaxy-s24"),
+        ("Pixel 8", "https://swappa.com/buy/google-pixel-8"),
+    ];
+    
+    for (category, url) in urls.iter() {
+        println!("  📱 Scraping {}: {}", category, url);
+        
+        if let Err(e) = driver.goto(*url).await {
+            eprintln!("    ❌ Failed to navigate to {}: {}", url, e);
+            continue;
         }
-        sleep(Duration::from_millis(1500)).await;
+        
+        // Wait for page to fully load
+        sleep(Duration::from_secs(4)).await;
+        
+        // Scroll to load all content
+        for i in 0..5 {
+            let scroll_pos = (i + 1) * 600;
+            let _ = driver.execute(&format!("window.scrollTo(0, {})", scroll_pos), vec![]).await;
+            sleep(Duration::from_millis(800)).await;
+        }
+        
+        // Take and save screenshot
+        let screenshot_path = format!("{}/{}.png", screenshot_dir, category.replace(" ", "_"));
+        if let Ok(png_data) = driver.screenshot_as_png().await {
+            if fs::write(&screenshot_path, &png_data).is_ok() {
+                println!("    📸 Screenshot saved: {}", screenshot_path);
+            }
+        }
+        
+        // Extract all product info directly from the page using comprehensive JS
+        let products_result = driver.execute(
+            r#"
+            var products = [];
+            
+            // Try to find all href links first
+            var allLinks = document.querySelectorAll('a[href]');
+            var listingLinks = [];
+            allLinks.forEach(function(a) {
+                var href = a.href || '';
+                if (href.includes('/listing/') || href.includes('/buy/') && href.includes('-')) {
+                    listingLinks.push(href);
+                }
+            });
+            
+            // Get the page text and parse it
+            var text = document.body.innerText;
+            var lines = text.split('\n');
+            
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].trim();
+                
+                // Look for price patterns
+                if (line.match(/^\$\d+/) && line.length < 15) {
+                    var price = line.split(' ')[0]; // Get just the price
+                    
+                    // Look backwards for product name
+                    for (var j = 1; j <= 5 && i >= j; j++) {
+                        var name = lines[i - j].trim();
+                        if (name.length > 5 && !name.startsWith('$') && 
+                            (name.includes('iPhone') || name.includes('Galaxy') || 
+                             name.includes('Pixel') || name.includes('GB') ||
+                             name.includes('Pro') || name.includes('Max') ||
+                             name.includes('Plus') || name.includes('Ultra'))) {
+                            
+                            // Check if we already have this product
+                            var exists = products.some(function(p) { return p.name === name; });
+                            if (!exists) {
+                                products.push({
+                                    name: name,
+                                    price: price,
+                                    url: listingLinks.length > products.length ? listingLinks[products.length] : ''
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            return { products: products.slice(0, 20), links: listingLinks.slice(0, 10) };
+            "#,
+            vec![]
+        ).await;
+        
+        if let Ok(result_value) = products_result {
+            let json = result_value.json();
+            
+            // Get listing links for detailed fetching
+            if let Some(links_arr) = json.get("links").and_then(|v| v.as_array()) {
+                let link_count = links_arr.len();
+                if link_count > 0 {
+                    println!("    🔗 Found {} listing links", link_count);
+                }
+            }
+            
+            // Get products
+            if let Some(products_arr) = json.get("products").and_then(|v| v.as_array()) {
+                for product in products_arr {
+                    let name = product.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let price = product.get("price").and_then(|v| v.as_str()).unwrap_or("");
+                    let prod_url = product.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    if !name.is_empty() && !all_products.iter().any(|p: &Product| p.name == name) {
+                        let final_url = if !prod_url.is_empty() && prod_url.contains("/listing/") {
+                            prod_url.to_string()
+                        } else {
+                            url.to_string()
+                        };
+                        
+                        all_products.push(Product {
+                            name: name.to_string(),
+                            price: price.to_string(),
+                            url: final_url,
+                            source: "Swappa".to_string(),
+                        });
+                        println!("      Found: {} - {}", name, price);
+                    }
+                }
+            }
+        }
+        
+        // Now click on individual listings to get their URLs
+        let click_result = driver.execute(
+            r#"
+            var listingCards = document.querySelectorAll('[class*="listing"], [class*="item"], [class*="card"]');
+            var urls = [];
+            
+            // Also try finding clickable elements with prices
+            var allElements = document.querySelectorAll('a');
+            for (var i = 0; i < Math.min(allElements.length, 100); i++) {
+                var el = allElements[i];
+                var href = el.href || '';
+                var text = el.innerText || '';
+                
+                if (href.includes('swappa.com') && text.includes('$') && 
+                    (text.includes('iPhone') || text.includes('Galaxy') || text.includes('Pixel') ||
+                     text.includes('Good') || text.includes('Fair') || text.includes('Mint'))) {
+                    urls.push({ url: href, text: text.substring(0, 100) });
+                }
+            }
+            
+            return urls.slice(0, 10);
+            "#,
+            vec![]
+        ).await;
+        
+        if let Ok(urls_value) = click_result {
+            if let Some(arr) = urls_value.json().as_array() {
+                for item in arr.iter().take(3) {
+                    let listing_url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    if !listing_url.is_empty() && listing_url.contains("/listing/") {
+                        // Visit this listing to get detailed info
+                        if let Ok(_) = driver.goto(listing_url).await {
+                            sleep(Duration::from_secs(3)).await;
+                            
+                            let detail_result = driver.execute(
+                                r#"
+                                var info = {};
+                                info.name = (document.querySelector('h1') || {}).innerText || '';
+                                info.price = (document.querySelector('[class*="price"]') || {}).innerText || '';
+                                info.condition = (document.querySelector('[class*="condition"]') || {}).innerText || '';
+                                info.seller = (document.querySelector('[class*="seller"], a[href*="/user/"]') || {}).innerText || '';
+                                info.url = window.location.href;
+                                return info;
+                                "#,
+                                vec![]
+                            ).await;
+                            
+                            if let Ok(info_value) = detail_result {
+                                let info = info_value.json();
+                                let name = info.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                let price = info.get("price").and_then(|v| v.as_str()).unwrap_or("");
+                                let url = info.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                                
+                                if !name.is_empty() && name.len() > 3 && !all_products.iter().any(|p| p.name == name) {
+                                    all_products.push(Product {
+                                        name: name.to_string(),
+                                        price: price.to_string(),
+                                        url: url.to_string(),
+                                        source: "Swappa".to_string(),
+                                    });
+                                    println!("      📦 Listing detail: {} - {}", name, price);
+                                }
+                            }
+                        }
+                        
+                        // Go back to the category page
+                        let _ = driver.goto(*url).await;
+                        sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+        
+        sleep(Duration::from_secs(1)).await;
     }
-
+    
+    // Close the browser
+    if let Err(e) = driver.quit().await {
+        eprintln!("  Warning: Failed to close browser: {}", e);
+    }
+    
+    println!("  ✓ Swappa scraping complete. Found {} products", all_products.len());
+    println!("  📁 Screenshots saved to: {}", screenshot_dir);
+    
     all_products
 }
 
@@ -668,8 +883,8 @@ async fn main() {
         println!("   🔗 {}", product.url);
     }
 
-    // Fetch detailed info for Swappa products
-    let swappa_details = fetch_product_details(&client, &swappa_products, 5).await;
+    // Fetch detailed info for Swappa products using Selenium
+    let swappa_details = fetch_swappa_details_selenium(&swappa_products, 5).await;
     
     println!("\n{}", "=".repeat(60));
     println!("📱 SWAPPA DETAILED PRODUCTS ({})", swappa_details.len());
@@ -709,4 +924,135 @@ async fn main() {
     println!("Total detailed: {}", newegg_details.len() + swappa_details.len());
 }
 
-
+// Fetch Swappa product details using Selenium (since regular HTTP doesn't work)
+async fn fetch_swappa_details_selenium(products: &[Product], max_items: usize) -> Vec<ProductDetails> {
+    let mut details = Vec::new();
+    
+    // Only process products with actual listing URLs
+    let products_to_fetch: Vec<_> = products.iter()
+        .filter(|p| p.url.contains("/listing/"))
+        .take(max_items)
+        .collect();
+    
+    if products_to_fetch.is_empty() {
+        println!("\n  📋 No individual Swappa listing URLs to fetch details from");
+        return details;
+    }
+    
+    println!("\n  📋 Fetching detailed info for {} Swappa products...\n", products_to_fetch.len());
+    
+    // Set up Chrome - headless mode
+    let mut caps = DesiredCapabilities::chrome();
+    caps.add_arg("--headless=new").ok();
+    caps.add_arg("--disable-gpu").ok();
+    caps.add_arg("--no-sandbox").ok();
+    caps.add_arg("--disable-dev-shm-usage").ok();
+    caps.add_arg("--window-size=1920,1200").ok();
+    caps.add_arg("--disable-blink-features=AutomationControlled").ok();
+    caps.add_arg("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36").ok();
+    
+    let driver = match WebDriver::new("http://localhost:9515", caps).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("  ❌ Failed to connect to ChromeDriver: {}", e);
+            return details;
+        }
+    };
+    
+    for (i, product) in products_to_fetch.iter().enumerate() {
+        println!("    [{}/{}] Fetching: {}", i + 1, products_to_fetch.len(), 
+            if product.name.len() > 50 { &product.name[..50] } else { &product.name });
+        
+        if let Err(e) = driver.goto(&product.url).await {
+            eprintln!("      ❌ Failed to navigate: {}", e);
+            continue;
+        }
+        
+        sleep(Duration::from_secs(3)).await;
+        
+        // Extract detailed info using JavaScript
+        let detail_result = driver.execute(
+            r#"
+            var info = {};
+            
+            // Get title
+            var title = document.querySelector('h1, .listing-title, [class*="title"]');
+            info.name = title ? title.innerText.trim() : '';
+            
+            // Get price
+            var priceEl = document.querySelector('[class*="price"], .price, .listing-price');
+            info.price = priceEl ? priceEl.innerText.trim() : '';
+            
+            // Get description
+            var descEl = document.querySelector('[class*="description"], .listing-description, .description');
+            info.description = descEl ? descEl.innerText.trim().substring(0, 500) : '';
+            
+            // Get condition
+            var condEl = document.querySelector('[class*="condition"], .condition-badge, .listing-condition');
+            info.condition = condEl ? condEl.innerText.trim() : '';
+            
+            // Get seller
+            var sellerEl = document.querySelector('[class*="seller"], .seller-name, a[href*="/user/"]');
+            info.seller = sellerEl ? sellerEl.innerText.trim() : '';
+            
+            // Get specs from page
+            var specs = [];
+            var specItems = document.querySelectorAll('[class*="spec"] li, .device-info li, .listing-details li');
+            specItems.forEach(function(item) {
+                var text = item.innerText.trim();
+                if (text && text.length > 2) specs.push(text);
+            });
+            info.specs = specs.slice(0, 10);
+            
+            // Get images
+            var images = [];
+            var imgs = document.querySelectorAll('img[src*="swappa"], .listing-images img, .gallery img');
+            imgs.forEach(function(img) {
+                if (img.src && !images.includes(img.src)) images.push(img.src);
+            });
+            info.images = images.slice(0, 5);
+            
+            return info;
+            "#,
+            vec![]
+        ).await;
+        
+        if let Ok(info_value) = detail_result {
+            let json = info_value.json();
+            
+            let name = json.get("name").and_then(|v| v.as_str()).unwrap_or(&product.name).to_string();
+            let price = json.get("price").and_then(|v| v.as_str()).unwrap_or(&product.price).to_string();
+            let description = json.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let condition = json.get("condition").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+            let seller = json.get("seller").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+            
+            let specs: Vec<String> = json.get("specs")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            
+            let images: Vec<String> = json.get("images")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            
+            details.push(ProductDetails {
+                name,
+                price,
+                url: product.url.clone(),
+                source: "Swappa".to_string(),
+                description,
+                specs,
+                images,
+                condition: if condition.is_empty() { "Unknown".to_string() } else { condition },
+                seller: if seller.is_empty() { "Unknown".to_string() } else { seller },
+            });
+        }
+        
+        sleep(Duration::from_secs(2)).await;
+    }
+    
+    let _ = driver.quit().await;
+    
+    details
+}
