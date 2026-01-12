@@ -2,15 +2,57 @@ use reqwest::header::USER_AGENT;
 use scraper::{Html, Selector};
 use std::time::Duration;
 use std::fs;
+use std::collections::HashSet;
 use tokio::time::sleep;
 use thirtyfour::prelude::*;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Product {
     name: String,
     price: String,
     url: String,
     source: String,
+}
+
+// File path for storing seen products
+const SEEN_PRODUCTS_FILE: &str = "seen_products.json";
+
+// Generate a unique key for a product (using source + name + price)
+fn product_key(product: &Product) -> String {
+    format!("{}|{}|{}", product.source, product.name, product.price)
+}
+
+// Load seen products from JSON file
+fn load_seen_products() -> HashSet<String> {
+    match fs::read_to_string(SEEN_PRODUCTS_FILE) {
+        Ok(content) => {
+            serde_json::from_str(&content).unwrap_or_else(|_| HashSet::new())
+        }
+        Err(_) => HashSet::new()
+    }
+}
+
+// Save seen products to JSON file
+fn save_seen_products(seen: &HashSet<String>) {
+    if let Ok(json) = serde_json::to_string_pretty(seen) {
+        let _ = fs::write(SEEN_PRODUCTS_FILE, json);
+    }
+}
+
+// Filter products to only return new ones and update seen set
+fn filter_new_products(products: Vec<Product>, seen: &mut HashSet<String>) -> Vec<Product> {
+    let mut new_products = Vec::new();
+    
+    for product in products {
+        let key = product_key(&product);
+        if !seen.contains(&key) {
+            seen.insert(key);
+            new_products.push(product);
+        }
+    }
+    
+    new_products
 }
 
 #[derive(Debug, Clone)]
@@ -634,168 +676,153 @@ async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
             }
         }
         
-        // Extract all product info directly from the page using comprehensive JS
-        let products_result = driver.execute(
-            r#"
+        // Extract ALL individual listings from the page using text scanning
+        let category_name = *category;
+        let script = format!(r#"
             var products = [];
+            var categoryName = "{}";
+            var seenKeys = new Set();
+            var method = 'text-scan';
             
-            // Try to find all href links first
-            var allLinks = document.querySelectorAll('a[href]');
-            var listingLinks = [];
-            allLinks.forEach(function(a) {
-                var href = a.href || '';
-                if (href.includes('/listing/') || href.includes('/buy/') && href.includes('-')) {
-                    listingLinks.push(href);
-                }
-            });
-            
-            // Get the page text and parse it
-            var text = document.body.innerText;
-            var lines = text.split('\n');
-            
-            for (var i = 0; i < lines.length; i++) {
-                var line = lines[i].trim();
+            // Method 1: Try to find actual listing links with prices
+            var links = document.querySelectorAll('a');
+            for (var i = 0; i < links.length && products.length < 30; i++) {{
+                var href = links[i].href || '';
+                var text = links[i].innerText || '';
                 
-                // Look for price patterns
-                if (line.match(/^\$\d+/) && line.length < 15) {
-                    var price = line.split(' ')[0]; // Get just the price
-                    
-                    // Look backwards for product name
-                    for (var j = 1; j <= 5 && i >= j; j++) {
-                        var name = lines[i - j].trim();
-                        if (name.length > 5 && !name.startsWith('$') && 
-                            (name.includes('iPhone') || name.includes('Galaxy') || 
-                             name.includes('Pixel') || name.includes('GB') ||
-                             name.includes('Pro') || name.includes('Max') ||
-                             name.includes('Plus') || name.includes('Ultra'))) {
+                // Look for listing-type links with prices
+                if ((href.includes('/listing/') || href.includes('/buy/used')) && text.match(/\$\d+/)) {{
+                    var priceMatch = text.match(/\$(\d{{2,4}})/);
+                    if (priceMatch) {{
+                        var priceNum = parseInt(priceMatch[1]);
+                        if (priceNum >= 100 && priceNum <= 1500) {{
+                            var price = '$' + priceMatch[1];
                             
-                            // Check if we already have this product
-                            var exists = products.some(function(p) { return p.name === name; });
-                            if (!exists) {
-                                products.push({
+                            // Don't add duplicates by href
+                            if (!seenKeys.has(href)) {{
+                                seenKeys.add(href);
+                                method = 'links';
+                                
+                                var condition = '';
+                                if (text.includes('Mint')) condition = 'Mint';
+                                else if (text.includes('Good')) condition = 'Good';
+                                else if (text.includes('Fair')) condition = 'Fair';
+                                
+                                var storage = '';
+                                var storageMatch = text.match(/(\d{{2,3}})\s*GB/i);
+                                if (storageMatch) storage = storageMatch[1] + 'GB';
+                                
+                                var name = categoryName;
+                                if (storage) name += ' ' + storage;
+                                if (condition) name += ' (' + condition + ')';
+                                
+                                products.push({{
                                     name: name,
                                     price: price,
-                                    url: listingLinks.length > products.length ? listingLinks[products.length] : ''
-                                });
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
+                                    condition: condition,
+                                    storage: storage,
+                                    url: href
+                                }});
+                            }}
+                        }}
+                    }}
+                }}
+            }}
             
-            return { products: products.slice(0, 20), links: listingLinks.slice(0, 10) };
-            "#,
-            vec![]
-        ).await;
+            // Method 2: Always do text scanning to find more prices
+            var text = document.body.innerText;
+            var lines = text.split('\n');
+            var lineIndex = 0;
+            
+            for (var i = 0; i < lines.length && products.length < 30; i++) {{
+                var line = lines[i].trim();
+                var priceMatch = line.match(/\$(\d{{2,4}})/);
+                
+                if (priceMatch) {{
+                    var priceNum = parseInt(priceMatch[1]);
+                    if (priceNum >= 100 && priceNum <= 1500) {{
+                        lineIndex++;
+                        var price = '$' + priceMatch[1];
+                        
+                        // Look for condition in surrounding context
+                        var condition = '';
+                        var storage = '';
+                        var contextText = lines.slice(Math.max(0, i-3), i+3).join(' ');
+                        
+                        if (contextText.includes('Mint')) condition = 'Mint';
+                        else if (contextText.includes('Good')) condition = 'Good';
+                        else if (contextText.includes('Fair')) condition = 'Fair';
+                        
+                        var storageMatch = contextText.match(/(\d{{2,3}})\s*GB/i);
+                        if (storageMatch) storage = storageMatch[1] + 'GB';
+                        
+                        // Create unique key including line position
+                        var key = 'line-' + i + '-' + price;
+                        if (!seenKeys.has(key)) {{
+                            seenKeys.add(key);
+                            
+                            var name = categoryName;
+                            if (storage) name += ' ' + storage;
+                            if (condition) name += ' (' + condition + ')';
+                            name += ' #' + lineIndex;
+                            
+                            products.push({{
+                                name: name,
+                                price: price,
+                                condition: condition,
+                                storage: storage,
+                                url: ''
+                            }});
+                        }}
+                    }}
+                }}
+            }}
+            
+            return {{ 
+                products: products, 
+                total: products.length, 
+                method: method
+            }};
+            "#, category_name);
+        
+        let products_result = driver.execute(&script, vec![]).await;
         
         if let Ok(result_value) = products_result {
             let json = result_value.json();
             
-            // Get listing links for detailed fetching
-            if let Some(links_arr) = json.get("links").and_then(|v| v.as_array()) {
-                let link_count = links_arr.len();
-                if link_count > 0 {
-                    println!("    🔗 Found {} listing links", link_count);
-                }
-            }
+            // Get total found
+            let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+            let method = json.get("method").and_then(|v| v.as_str()).unwrap_or("unknown");
+            println!("    🔍 Found {} listings (via {})", total, method);
             
-            // Get products
+            // Get all products
             if let Some(products_arr) = json.get("products").and_then(|v| v.as_array()) {
+                let mut added_count = 0;
                 for product in products_arr {
                     let name = product.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let price = product.get("price").and_then(|v| v.as_str()).unwrap_or("");
                     let prod_url = product.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let condition = product.get("condition").and_then(|v| v.as_str()).unwrap_or("");
                     
-                    if !name.is_empty() && !all_products.iter().any(|p: &Product| p.name == name) {
-                        let final_url = if !prod_url.is_empty() && prod_url.contains("/listing/") {
+                    if !name.is_empty() && !price.is_empty() {
+                        let final_url = if !prod_url.is_empty() {
                             prod_url.to_string()
                         } else {
                             url.to_string()
                         };
                         
+                        // Don't filter duplicates by name - allow same model with different conditions/prices
                         all_products.push(Product {
                             name: name.to_string(),
                             price: price.to_string(),
                             url: final_url,
                             source: "Swappa".to_string(),
                         });
-                        println!("      Found: {} - {}", name, price);
+                        added_count += 1;
                     }
                 }
-            }
-        }
-        
-        // Now click on individual listings to get their URLs
-        let click_result = driver.execute(
-            r#"
-            var listingCards = document.querySelectorAll('[class*="listing"], [class*="item"], [class*="card"]');
-            var urls = [];
-            
-            // Also try finding clickable elements with prices
-            var allElements = document.querySelectorAll('a');
-            for (var i = 0; i < Math.min(allElements.length, 100); i++) {
-                var el = allElements[i];
-                var href = el.href || '';
-                var text = el.innerText || '';
-                
-                if (href.includes('swappa.com') && text.includes('$') && 
-                    (text.includes('iPhone') || text.includes('Galaxy') || text.includes('Pixel') ||
-                     text.includes('Good') || text.includes('Fair') || text.includes('Mint'))) {
-                    urls.push({ url: href, text: text.substring(0, 100) });
-                }
-            }
-            
-            return urls.slice(0, 10);
-            "#,
-            vec![]
-        ).await;
-        
-        if let Ok(urls_value) = click_result {
-            if let Some(arr) = urls_value.json().as_array() {
-                for item in arr.iter().take(3) {
-                    let listing_url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    
-                    if !listing_url.is_empty() && listing_url.contains("/listing/") {
-                        // Visit this listing to get detailed info
-                        if let Ok(_) = driver.goto(listing_url).await {
-                            sleep(Duration::from_secs(3)).await;
-                            
-                            let detail_result = driver.execute(
-                                r#"
-                                var info = {};
-                                info.name = (document.querySelector('h1') || {}).innerText || '';
-                                info.price = (document.querySelector('[class*="price"]') || {}).innerText || '';
-                                info.condition = (document.querySelector('[class*="condition"]') || {}).innerText || '';
-                                info.seller = (document.querySelector('[class*="seller"], a[href*="/user/"]') || {}).innerText || '';
-                                info.url = window.location.href;
-                                return info;
-                                "#,
-                                vec![]
-                            ).await;
-                            
-                            if let Ok(info_value) = detail_result {
-                                let info = info_value.json();
-                                let name = info.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                let price = info.get("price").and_then(|v| v.as_str()).unwrap_or("");
-                                let url = info.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                                
-                                if !name.is_empty() && name.len() > 3 && !all_products.iter().any(|p| p.name == name) {
-                                    all_products.push(Product {
-                                        name: name.to_string(),
-                                        price: price.to_string(),
-                                        url: url.to_string(),
-                                        source: "Swappa".to_string(),
-                                    });
-                                    println!("      📦 Listing detail: {} - {}", name, price);
-                                }
-                            }
-                        }
-                        
-                        // Go back to the category page
-                        let _ = driver.goto(*url).await;
-                        sleep(Duration::from_secs(2)).await;
-                    }
+                if added_count > 0 {
+                    println!("    ✅ Added {} listings from {}", added_count, category);
                 }
             }
         }
@@ -822,7 +849,12 @@ async fn main() {
         .expect("Failed to create HTTP client");
 
     println!("🛒 Product Scraper - Newegg & Swappa");
-    println!("⏰ Running every 1 minute. Press Ctrl+C to stop.\n");
+    println!("⏰ Running every 1 minute. Press Ctrl+C to stop.");
+    println!("📁 Tracking seen products in: {}\n", SEEN_PRODUCTS_FILE);
+    
+    // Load previously seen products
+    let mut seen_products = load_seen_products();
+    println!("📊 Loaded {} previously seen products\n", seen_products.len());
     
     let mut run_count = 0;
     
@@ -836,102 +868,127 @@ async fn main() {
 
         // Scrape Newegg
         println!("\n📦 Scraping Newegg...\n");
-        let newegg_products = scrape_newegg(&client).await;
+        let all_newegg_products = scrape_newegg(&client).await;
+        let newegg_products = filter_new_products(all_newegg_products.clone(), &mut seen_products);
         
         println!("\n{}", "-".repeat(60));
-        println!("NEWEGG PRODUCTS ({})", newegg_products.len());
+        println!("NEWEGG: {} total, {} NEW", all_newegg_products.len(), newegg_products.len());
         println!("{}", "-".repeat(60));
         
-        for (i, product) in newegg_products.iter().take(15).enumerate() {
-            println!("\n{}. {}", i + 1, product.name);
-            println!("   💰 Price: {}", product.price);
-            println!("   🔗 {}", product.url);
+        if newegg_products.is_empty() {
+            println!("\n  ℹ️  No new Newegg products found this run");
+        } else {
+            println!("\n🆕 NEW NEWEGG PRODUCTS:");
+            for (i, product) in newegg_products.iter().take(15).enumerate() {
+                println!("\n{}. {}", i + 1, product.name);
+                println!("   💰 Price: {}", product.price);
+                println!("   🔗 {}", product.url);
+            }
         }
 
-        // Fetch detailed info for Newegg products
-        let newegg_details = fetch_product_details(&client, &newegg_products, 5).await;
+        // Fetch detailed info for new Newegg products
+        let newegg_details = if !newegg_products.is_empty() {
+            fetch_product_details(&client, &newegg_products, 5).await
+        } else {
+            Vec::new()
+        };
         
-        println!("\n{}", "=".repeat(60));
-        println!("📦 NEWEGG DETAILED PRODUCTS ({})", newegg_details.len());
-        println!("{}", "=".repeat(60));
-        
-        for (i, detail) in newegg_details.iter().enumerate() {
-            println!("\n{}. {}", i + 1, detail.name);
-            println!("   💰 Price: {}", detail.price);
-            println!("   📝 Description: {}", if detail.description.len() > 100 { 
-                format!("{}...", &detail.description[..100]) 
-            } else { 
-                detail.description.clone() 
-            });
-            println!("   🏷️  Condition: {}", detail.condition);
-            println!("   👤 Seller: {}", detail.seller);
-            if !detail.specs.is_empty() {
-                println!("   📋 Specs ({}):", detail.specs.len());
-                for spec in detail.specs.iter().take(3) {
-                    println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+        if !newegg_details.is_empty() {
+            println!("\n{}", "=".repeat(60));
+            println!("📦 NEW NEWEGG DETAILED PRODUCTS ({})", newegg_details.len());
+            println!("{}", "=".repeat(60));
+            
+            for (i, detail) in newegg_details.iter().enumerate() {
+                println!("\n{}. {}", i + 1, detail.name);
+                println!("   💰 Price: {}", detail.price);
+                println!("   📝 Description: {}", if detail.description.len() > 100 { 
+                    format!("{}...", &detail.description[..100]) 
+                } else { 
+                    detail.description.clone() 
+                });
+                println!("   🏷️  Condition: {}", detail.condition);
+                println!("   👤 Seller: {}", detail.seller);
+                if !detail.specs.is_empty() {
+                    println!("   📋 Specs ({}):", detail.specs.len());
+                    for spec in detail.specs.iter().take(3) {
+                        println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+                    }
                 }
+                if !detail.images.is_empty() {
+                    println!("   🖼️  Images: {}", detail.images.len());
+                }
+                println!("   🔗 {}", detail.url);
             }
-            if !detail.images.is_empty() {
-                println!("   🖼️  Images: {}", detail.images.len());
-            }
-            println!("   🔗 {}", detail.url);
         }
 
         sleep(Duration::from_millis(2000)).await;
 
         // Scrape Swappa
         println!("\n\n📱 Scraping Swappa...\n");
-        let swappa_products = scrape_swappa(&client).await;
+        let all_swappa_products = scrape_swappa(&client).await;
+        let swappa_products = filter_new_products(all_swappa_products.clone(), &mut seen_products);
         
         println!("\n{}", "-".repeat(60));
-        println!("SWAPPA PRODUCTS ({})", swappa_products.len());
+        println!("SWAPPA: {} total, {} NEW", all_swappa_products.len(), swappa_products.len());
         println!("{}", "-".repeat(60));
         
-        for (i, product) in swappa_products.iter().take(15).enumerate() {
-            println!("\n{}. {}", i + 1, product.name);
-            println!("   💰 Price: {}", product.price);
-            println!("   🔗 {}", product.url);
+        if swappa_products.is_empty() {
+            println!("\n  ℹ️  No new Swappa products found this run");
+        } else {
+            println!("\n🆕 NEW SWAPPA PRODUCTS:");
+            for (i, product) in swappa_products.iter().take(15).enumerate() {
+                println!("\n{}. {}", i + 1, product.name);
+                println!("   💰 Price: {}", product.price);
+                println!("   🔗 {}", product.url);
+            }
         }
 
-        // Fetch detailed info for Swappa products using Selenium
-        let swappa_details = fetch_swappa_details_selenium(&swappa_products, 5).await;
+        // Fetch detailed info for new Swappa products using Selenium
+        let swappa_details = if !swappa_products.is_empty() {
+            fetch_swappa_details_selenium(&swappa_products, 5).await
+        } else {
+            Vec::new()
+        };
         
-        println!("\n{}", "=".repeat(60));
-        println!("📱 SWAPPA DETAILED PRODUCTS ({})", swappa_details.len());
-        println!("{}", "=".repeat(60));
-        
-        for (i, detail) in swappa_details.iter().enumerate() {
-            println!("\n{}. {}", i + 1, detail.name);
-            println!("   💰 Price: {}", detail.price);
-            println!("   📝 Description: {}", if detail.description.len() > 100 { 
-                format!("{}...", &detail.description[..100]) 
-            } else { 
-                detail.description.clone() 
-            });
-            println!("   🏷️  Condition: {}", detail.condition);
-            println!("   👤 Seller: {}", detail.seller);
-            if !detail.specs.is_empty() {
-                println!("   📋 Specs ({}):", detail.specs.len());
-                for spec in detail.specs.iter().take(3) {
-                    println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+        if !swappa_details.is_empty() {
+            println!("\n{}", "=".repeat(60));
+            println!("📱 NEW SWAPPA DETAILED PRODUCTS ({})", swappa_details.len());
+            println!("{}", "=".repeat(60));
+            
+            for (i, detail) in swappa_details.iter().enumerate() {
+                println!("\n{}. {}", i + 1, detail.name);
+                println!("   💰 Price: {}", detail.price);
+                println!("   📝 Description: {}", if detail.description.len() > 100 { 
+                    format!("{}...", &detail.description[..100]) 
+                } else { 
+                    detail.description.clone() 
+                });
+                println!("   🏷️  Condition: {}", detail.condition);
+                println!("   👤 Seller: {}", detail.seller);
+                if !detail.specs.is_empty() {
+                    println!("   📋 Specs ({}):", detail.specs.len());
+                    for spec in detail.specs.iter().take(3) {
+                        println!("      - {}", if spec.len() > 60 { format!("{}...", &spec[..60]) } else { spec.clone() });
+                    }
                 }
+                if !detail.images.is_empty() {
+                    println!("   🖼️  Images: {}", detail.images.len());
+                }
+                println!("   🔗 {}", detail.url);
             }
-            if !detail.images.is_empty() {
-                println!("   🖼️  Images: {}", detail.images.len());
-            }
-            println!("   🔗 {}", detail.url);
         }
+
+        // Save seen products after each run
+        save_seen_products(&seen_products);
 
         // Summary
         println!("\n\n{}", "=".repeat(60));
         println!("📊 SUMMARY - Run #{}", run_count);
         println!("{}", "=".repeat(60));
-        println!("Newegg products found: {}", newegg_products.len());
-        println!("Newegg detailed: {}", newegg_details.len());
-        println!("Swappa products found: {}", swappa_products.len());
-        println!("Swappa detailed: {}", swappa_details.len());
-        println!("Total products: {}", newegg_products.len() + swappa_products.len());
-        println!("Total detailed: {}", newegg_details.len() + swappa_details.len());
+        println!("Newegg: {} total scraped, {} NEW", all_newegg_products.len(), newegg_products.len());
+        println!("Swappa: {} total scraped, {} NEW", all_swappa_products.len(), swappa_products.len());
+        println!("Total NEW this run: {}", newegg_products.len() + swappa_products.len());
+        println!("Total products tracked: {}", seen_products.len());
         
         // Wait 1 minute before next scrape
         println!("\n⏳ Next scrape in 60 seconds...");

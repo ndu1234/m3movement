@@ -71,6 +71,8 @@ dependencies = [
  "image",
  "reqwest 0.11.27",
  "scraper",
+ "serde",
+ "serde_json",
  "thirtyfour",
  "tokio",
 ]
