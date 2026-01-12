@@ -678,39 +678,126 @@ async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
         
         // Extract ALL individual listings from the page using text scanning
         let category_name = *category;
+        let base_url = *url;
         let script = format!(r#"
             var products = [];
             var categoryName = "{}";
+            var baseUrl = "{}";
             var seenKeys = new Set();
             var method = 'text-scan';
+            var listingIndex = 0;
             
-            // Method 1: Try to find actual listing links with prices
-            var links = document.querySelectorAll('a');
-            for (var i = 0; i < links.length && products.length < 30; i++) {{
-                var href = links[i].href || '';
-                var text = links[i].innerText || '';
+            // Find listing rows/cards with price information
+            // Swappa typically shows listings as rows with price, condition, storage info
+            var cards = document.querySelectorAll('[class*="listing"], [class*="item"], [class*="card"], [class*="row"], [class*="product"], article, [data-listing], tr, [role="row"]');
+            
+            for (var i = 0; i < cards.length && products.length < 30; i++) {{
+                var card = cards[i];
+                var text = card.innerText || '';
+                var priceMatch = text.match(/\$(\d{{2,4}})/);
                 
-                // Look for listing-type links with prices
-                if ((href.includes('/listing/') || href.includes('/buy/used')) && text.match(/\$\d+/)) {{
-                    var priceMatch = text.match(/\$(\d{{2,4}})/);
+                if (priceMatch) {{
+                    var priceNum = parseInt(priceMatch[1]);
+                    // Filter to reasonable phone prices
+                    if (priceNum >= 100 && priceNum <= 1500) {{
+                        var price = '$' + priceMatch[1];
+                        
+                        // Find best link in card - prefer prices or listing links
+                        var cardAnchors = card.querySelectorAll('a');
+                        var href = '';
+                        
+                        for (var j = 0; j < cardAnchors.length; j++) {{
+                            var linkHref = cardAnchors[j].href || '';
+                            // Prefer prices page or listing-specific URLs
+                            if (linkHref.includes('/prices/') || linkHref.includes('/listing/')) {{
+                                href = linkHref;
+                                break;
+                            }}
+                            // Fallback to guide page
+                            if (!href && linkHref.includes('/guide/') && !linkHref.includes('/reviews')) {{
+                                href = linkHref;
+                            }}
+                        }}
+                        
+                        // If no good link, use baseUrl with listing index for tracking
+                        if (!href) {{
+                            href = baseUrl;
+                        }}
+                        
+                        // Extract condition
+                        var condition = '';
+                        if (text.includes('Mint')) condition = 'Mint';
+                        else if (text.includes('Good')) condition = 'Good';
+                        else if (text.includes('Fair')) condition = 'Fair';
+                        
+                        // Extract storage
+                        var storage = '';
+                        var storageMatch = text.match(/(\d{{2,3}})\s*GB/i);
+                        if (storageMatch) storage = storageMatch[1] + 'GB';
+                        
+                        // Extract carrier/unlock status
+                        var carrier = '';
+                        if (text.includes('Unlocked')) carrier = 'Unlocked';
+                        else if (text.includes('Verizon')) carrier = 'Verizon';
+                        else if (text.includes('T-Mobile')) carrier = 'T-Mobile';
+                        else if (text.includes('AT&T')) carrier = 'AT&T';
+                        
+                        // Create unique key based on card content to avoid duplicates
+                        var key = price + '-' + storage + '-' + condition + '-' + i;
+                        if (!seenKeys.has(key)) {{
+                            seenKeys.add(key);
+                            method = 'cards';
+                            listingIndex++;
+                            
+                            // Build descriptive name
+                            var name = categoryName;
+                            if (storage) name += ' ' + storage;
+                            if (carrier) name += ' ' + carrier;
+                            if (condition) name += ' (' + condition + ')';
+                            
+                            products.push({{
+                                name: name,
+                                price: price,
+                                condition: condition,
+                                storage: storage,
+                                carrier: carrier,
+                                url: href,
+                                listingNum: listingIndex
+                            }});
+                        }}
+                    }}
+                }}
+            }}
+            
+            // Fallback: Text scanning if no cards found
+            if (products.length == 0) {{
+                var bodyText = document.body.innerText;
+                var textLines = bodyText.split('\n');
+                
+                for (var i = 0; i < textLines.length && products.length < 30; i++) {{
+                    var line = textLines[i].trim();
+                    var priceMatch = line.match(/\$(\d{{2,4}})/);
+                    
                     if (priceMatch) {{
                         var priceNum = parseInt(priceMatch[1]);
                         if (priceNum >= 100 && priceNum <= 1500) {{
+                            listingIndex++;
                             var price = '$' + priceMatch[1];
                             
-                            // Don't add duplicates by href
-                            if (!seenKeys.has(href)) {{
-                                seenKeys.add(href);
-                                method = 'links';
-                                
-                                var condition = '';
-                                if (text.includes('Mint')) condition = 'Mint';
-                                else if (text.includes('Good')) condition = 'Good';
-                                else if (text.includes('Fair')) condition = 'Fair';
-                                
-                                var storage = '';
-                                var storageMatch = text.match(/(\d{{2,3}})\s*GB/i);
-                                if (storageMatch) storage = storageMatch[1] + 'GB';
+                            var condition = '';
+                            var storage = '';
+                            var contextText = textLines.slice(Math.max(0, i-3), i+3).join(' ');
+                            
+                            if (contextText.includes('Mint')) condition = 'Mint';
+                            else if (contextText.includes('Good')) condition = 'Good';
+                            else if (contextText.includes('Fair')) condition = 'Fair';
+                            
+                            var storageMatch = contextText.match(/(\d{{2,3}})\s*GB/i);
+                            if (storageMatch) storage = storageMatch[1] + 'GB';
+                            
+                            var key = 'line-' + i + '-' + price;
+                            if (!seenKeys.has(key)) {{
+                                seenKeys.add(key);
                                 
                                 var name = categoryName;
                                 if (storage) name += ' ' + storage;
@@ -721,58 +808,11 @@ async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
                                     price: price,
                                     condition: condition,
                                     storage: storage,
-                                    url: href
+                                    carrier: '',
+                                    url: baseUrl,
+                                    listingNum: listingIndex
                                 }});
                             }}
-                        }}
-                    }}
-                }}
-            }}
-            
-            // Method 2: Always do text scanning to find more prices
-            var text = document.body.innerText;
-            var lines = text.split('\n');
-            var lineIndex = 0;
-            
-            for (var i = 0; i < lines.length && products.length < 30; i++) {{
-                var line = lines[i].trim();
-                var priceMatch = line.match(/\$(\d{{2,4}})/);
-                
-                if (priceMatch) {{
-                    var priceNum = parseInt(priceMatch[1]);
-                    if (priceNum >= 100 && priceNum <= 1500) {{
-                        lineIndex++;
-                        var price = '$' + priceMatch[1];
-                        
-                        // Look for condition in surrounding context
-                        var condition = '';
-                        var storage = '';
-                        var contextText = lines.slice(Math.max(0, i-3), i+3).join(' ');
-                        
-                        if (contextText.includes('Mint')) condition = 'Mint';
-                        else if (contextText.includes('Good')) condition = 'Good';
-                        else if (contextText.includes('Fair')) condition = 'Fair';
-                        
-                        var storageMatch = contextText.match(/(\d{{2,3}})\s*GB/i);
-                        if (storageMatch) storage = storageMatch[1] + 'GB';
-                        
-                        // Create unique key including line position
-                        var key = 'line-' + i + '-' + price;
-                        if (!seenKeys.has(key)) {{
-                            seenKeys.add(key);
-                            
-                            var name = categoryName;
-                            if (storage) name += ' ' + storage;
-                            if (condition) name += ' (' + condition + ')';
-                            name += ' #' + lineIndex;
-                            
-                            products.push({{
-                                name: name,
-                                price: price,
-                                condition: condition,
-                                storage: storage,
-                                url: ''
-                            }});
                         }}
                     }}
                 }}
@@ -783,7 +823,7 @@ async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
                 total: products.length, 
                 method: method
             }};
-            "#, category_name);
+            "#, category_name, base_url);
         
         let products_result = driver.execute(&script, vec![]).await;
         
@@ -793,6 +833,7 @@ async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
             // Get total found
             let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
             let method = json.get("method").and_then(|v| v.as_str()).unwrap_or("unknown");
+            
             println!("    🔍 Found {} listings (via {})", total, method);
             
             // Get all products
@@ -802,7 +843,6 @@ async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
                     let name = product.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let price = product.get("price").and_then(|v| v.as_str()).unwrap_or("");
                     let prod_url = product.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let condition = product.get("condition").and_then(|v| v.as_str()).unwrap_or("");
                     
                     if !name.is_empty() && !price.is_empty() {
                         let final_url = if !prod_url.is_empty() {
