@@ -915,6 +915,16 @@ async fn main() {
         println!("NEWEGG: {} total, {} NEW", all_newegg_products.len(), newegg_products.len());
         println!("{}", "-".repeat(60));
         
+        // Always show all scraped items with links
+        if !all_newegg_products.is_empty() {
+            println!("\n📋 ALL SCRAPED NEWEGG ITEMS ({}):", all_newegg_products.len());
+            for (i, product) in all_newegg_products.iter().enumerate() {
+                println!("\n{}. {}", i + 1, product.name);
+                println!("   💰 Price: {}", product.price);
+                println!("   🔗 {}", product.url);
+            }
+        }
+        
         if newegg_products.is_empty() {
             println!("\n  ℹ️  No new Newegg products found this run");
         } else {
@@ -971,6 +981,16 @@ async fn main() {
         println!("\n{}", "-".repeat(60));
         println!("SWAPPA: {} total, {} NEW", all_swappa_products.len(), swappa_products.len());
         println!("{}", "-".repeat(60));
+        
+        // Always show all scraped items with links
+        if !all_swappa_products.is_empty() {
+            println!("\n📋 ALL SCRAPED SWAPPA ITEMS ({}):", all_swappa_products.len());
+            for (i, product) in all_swappa_products.iter().enumerate() {
+                println!("\n{}. {}", i + 1, product.name);
+                println!("   💰 Price: {}", product.price);
+                println!("   🔗 {}", product.url);
+            }
+        }
         
         if swappa_products.is_empty() {
             println!("\n  ℹ️  No new Swappa products found this run");
