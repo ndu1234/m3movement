@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use tokio::time::sleep;
 use thirtyfour::prelude::*;
 use serde::{Serialize, Deserialize};
+use chrono::{Local, DateTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Product {
@@ -15,8 +16,71 @@ struct Product {
     source: String,
 }
 
-// File path for storing seen products
+// Structure for arbitrage data export
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ArbitrageOpportunity {
+    buy_product_name: String,
+    buy_source: String,
+    buy_price: f64,
+    buy_url: String,
+    ebay_avg_sold_price: f64,
+    ebay_sold_count: usize,
+    ebay_price_range: String,
+    potential_profit: f64,
+    margin_percent: f64,
+    sample_ebay_urls: Vec<String>,
+}
+
+// Structure for frontend data export
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScraperData {
+    last_updated: String,
+    run_count: u32,
+    newegg_products: Vec<Product>,
+    swappa_products: Vec<Product>,
+    ebay_products: Vec<Product>,
+    arbitrage_opportunities: Vec<ArbitrageOpportunity>,
+    total_tracked: usize,
+}
+
+// File paths
 const SEEN_PRODUCTS_FILE: &str = "seen_products.json";
+const FRONTEND_DATA_FILE: &str = "scraper_data.json";
+
+// Save data for frontend
+fn save_frontend_data(data: &ScraperData) {
+    if let Ok(json) = serde_json::to_string_pretty(data) {
+        if let Err(e) = fs::write(FRONTEND_DATA_FILE, json) {
+            eprintln!("Failed to write frontend data: {}", e);
+        } else {
+            println!("📁 Frontend data saved to {}", FRONTEND_DATA_FILE);
+        }
+    }
+}
+
+// Convert PriceComparison to ArbitrageOpportunity for frontend export
+fn convert_to_arbitrage_opportunities(comparisons: &[PriceComparison]) -> Vec<ArbitrageOpportunity> {
+    let mut opportunities = Vec::new();
+    
+    for comparison in comparisons {
+        opportunities.push(ArbitrageOpportunity {
+            buy_product_name: comparison.source_product.name.clone(),
+            buy_source: comparison.source_product.source.clone(),
+            buy_price: comparison.source_price,
+            buy_url: comparison.source_product.url.clone(),
+            ebay_avg_sold_price: comparison.ebay_avg_sold,
+            ebay_sold_count: comparison.ebay_sold_count,
+            ebay_price_range: format!("${:.2} - ${:.2}", comparison.ebay_min_price, comparison.ebay_max_price),
+            potential_profit: comparison.profit,
+            margin_percent: comparison.margin_percent,
+            sample_ebay_urls: comparison.sample_ebay_urls.clone(),
+        });
+    }
+    
+    // Sort by profit descending
+    opportunities.sort_by(|a, b| b.potential_profit.partial_cmp(&a.potential_profit).unwrap_or(std::cmp::Ordering::Equal));
+    opportunities
+}
 
 // Generate a unique key for a product (using source + name + price)
 fn product_key(product: &Product) -> String {
@@ -53,6 +117,219 @@ fn filter_new_products(products: Vec<Product>, seen: &mut HashSet<String>) -> Ve
     }
     
     new_products
+}
+
+// Parse price string to f64
+fn parse_price(price_str: &str) -> Option<f64> {
+    // Remove currency symbols, commas, and extra whitespace
+    let cleaned: String = price_str
+        .replace('$', "")
+        .replace(',', "")
+        .replace(" ", "")
+        .trim()
+        .chars()
+        .take_while(|c| c.is_digit(10) || *c == '.')
+        .collect();
+    
+    cleaned.parse::<f64>().ok()
+}
+
+// Extract key product identifiers from name (model numbers, brand, etc.)
+fn extract_keywords(name: &str) -> Vec<String> {
+    let name_lower = name.to_lowercase();
+    
+    // Common phone models and keywords to match
+    let keywords: Vec<&str> = vec![
+        // iPhones
+        "iphone 16 pro max", "iphone 16 pro", "iphone 16", "iphone 16e",
+        "iphone 15 pro max", "iphone 15 pro", "iphone 15 plus", "iphone 15",
+        "iphone 14 pro max", "iphone 14 pro", "iphone 14 plus", "iphone 14",
+        "iphone 13 pro max", "iphone 13 pro", "iphone 13 mini", "iphone 13",
+        "iphone 12 pro max", "iphone 12 pro", "iphone 12 mini", "iphone 12",
+        "iphone se",
+        // Samsung
+        "galaxy s24 ultra", "galaxy s24+", "galaxy s24",
+        "galaxy s23 ultra", "galaxy s23+", "galaxy s23",
+        "galaxy z fold", "galaxy z flip",
+        "galaxy a54", "galaxy a34", "galaxy a14",
+        // Google Pixel
+        "pixel 9 pro xl", "pixel 9 pro", "pixel 9",
+        "pixel 8 pro", "pixel 8a", "pixel 8",
+        "pixel 7 pro", "pixel 7a", "pixel 7",
+        // Storage sizes
+        "128gb", "256gb", "512gb", "1tb",
+        // Conditions
+        "unlocked",
+    ];
+    
+    let mut found_keywords = Vec::new();
+    for kw in keywords {
+        if name_lower.contains(kw) {
+            found_keywords.push(kw.to_string());
+        }
+    }
+    
+    found_keywords
+}
+
+// Calculate similarity score between two products
+fn similarity_score(p1: &Product, p2: &Product) -> f64 {
+    let kw1 = extract_keywords(&p1.name);
+    let kw2 = extract_keywords(&p2.name);
+    
+    if kw1.is_empty() || kw2.is_empty() {
+        return 0.0;
+    }
+    
+    let mut matches = 0;
+    for k in &kw1 {
+        if kw2.contains(k) {
+            matches += 1;
+        }
+    }
+    
+    // Higher weight for phone model matches
+    let phone_models = ["iphone", "galaxy", "pixel"];
+    let mut model_match = false;
+    for model in phone_models {
+        let p1_has = p1.name.to_lowercase().contains(model);
+        let p2_has = p2.name.to_lowercase().contains(model);
+        if p1_has && p2_has {
+            model_match = true;
+            break;
+        }
+    }
+    
+    if !model_match {
+        return 0.0;
+    }
+    
+    // Calculate score based on keyword matches
+    let max_keywords = kw1.len().max(kw2.len()) as f64;
+    (matches as f64 / max_keywords) * 100.0
+}
+
+#[derive(Debug, Clone)]
+struct PriceComparison {
+    product_name: String,
+    source_product: Product,
+    source_price: f64,
+    ebay_avg_sold: f64,
+    ebay_sold_count: usize,
+    ebay_min_price: f64,
+    ebay_max_price: f64,
+    sample_ebay_urls: Vec<String>,
+    profit: f64,
+    margin_percent: f64,
+}
+
+// Find arbitrage opportunities by comparing Swappa prices to eBay SOLD averages
+fn find_arbitrage_opportunities(
+    _newegg: &[Product],  // Not using Newegg for comparison anymore
+    swappa: &[Product],
+    ebay_sold: &[Product],
+) -> Vec<PriceComparison> {
+    let mut opportunities = Vec::new();
+    
+    // Only use Swappa as buy source
+    for buy_product in swappa {
+        if let Some(buy_price) = parse_price(&buy_product.price) {
+            if buy_price < 50.0 {
+                continue; // Skip very low priced items
+            }
+            
+            // Find similar eBay SOLD items and calculate average
+            let mut similar_sold: Vec<(f64, String)> = Vec::new();
+            
+            for sold_product in ebay_sold {
+                let score = similarity_score(buy_product, sold_product);
+                if score >= 40.0 {  // Lower threshold since we're matching sold items
+                    if let Some(sold_price) = parse_price(&sold_product.price) {
+                        if sold_price > 50.0 {  // Filter out accessories/parts
+                            similar_sold.push((sold_price, sold_product.url.clone()));
+                        }
+                    }
+                }
+            }
+            
+            // Need at least 2 sold items to calculate meaningful average
+            if similar_sold.len() >= 2 {
+                let prices: Vec<f64> = similar_sold.iter().map(|(p, _)| *p).collect();
+                let avg_sold = prices.iter().sum::<f64>() / prices.len() as f64;
+                let min_price = prices.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max_price = prices.iter().cloned().fold(0.0, f64::max);
+                
+                // Calculate profit based on average sold price
+                let profit = avg_sold - buy_price;
+                let margin_percent = (profit / buy_price) * 100.0;
+                
+                // Only include if there's meaningful profit (> 10%)
+                if margin_percent > 10.0 && profit > 20.0 {
+                    let sample_urls: Vec<String> = similar_sold.iter()
+                        .take(3)
+                        .map(|(_, url)| url.clone())
+                        .collect();
+                    
+                    opportunities.push(PriceComparison {
+                        product_name: buy_product.name.clone(),
+                        source_product: buy_product.clone(),
+                        source_price: buy_price,
+                        ebay_avg_sold: avg_sold,
+                        ebay_sold_count: similar_sold.len(),
+                        ebay_min_price: min_price,
+                        ebay_max_price: max_price,
+                        sample_ebay_urls: sample_urls,
+                        profit,
+                        margin_percent,
+                    });
+                }
+            }
+        }
+    }
+    
+    // Sort opportunities by profit descending
+    opportunities.sort_by(|a, b| {
+        b.profit.partial_cmp(&a.profit).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    
+    opportunities
+}
+
+// Display arbitrage opportunities
+fn display_arbitrage_opportunities(opportunities: &[PriceComparison]) {
+    if opportunities.is_empty() {
+        println!("\n  ℹ️  No arbitrage opportunities found this run");
+        println!("     (Need similar items sold on eBay to compare prices)");
+        return;
+    }
+    
+    println!("\n📋 ARBITRAGE OPPORTUNITIES ({}):", opportunities.len());
+    println!("   Comparing Swappa prices to eBay SOLD averages\n");
+    
+    for (i, opp) in opportunities.iter().take(15).enumerate() {
+        println!("{}. {}", i + 1, truncate_string(&opp.product_name, 60));
+        println!("   📥 BUY ON SWAPPA: ${:.2}", opp.source_price);
+        println!("      🔗 {}", opp.source_product.url);
+        println!("   📊 EBAY SOLD DATA ({} recent sales):", opp.ebay_sold_count);
+        println!("      Average: ${:.2}", opp.ebay_avg_sold);
+        println!("      Range: ${:.2} - ${:.2}", opp.ebay_min_price, opp.ebay_max_price);
+        println!("   💵 POTENTIAL PROFIT: ${:.2} ({:.1}% margin)", opp.profit, opp.margin_percent);
+        if !opp.sample_ebay_urls.is_empty() {
+            println!("   🔗 Sample sold listings:");
+            for url in &opp.sample_ebay_urls {
+                println!("      {}", url);
+            }
+        }
+        println!();
+    }
+}
+
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}...", &s[..max_len])
+    } else {
+        s.to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -881,6 +1158,246 @@ async fn scrape_swappa(_client: &reqwest::Client) -> Vec<Product> {
     all_products
 }
 
+async fn scrape_ebay(_client: &reqwest::Client) -> Vec<Product> {
+    let mut all_products = Vec::new();
+    
+    println!("  Starting Selenium WebDriver for eBay...");
+    
+    // Set up Chrome options - with extra measures to avoid detection
+    let mut caps = DesiredCapabilities::chrome();
+    caps.add_arg("--headless=new").ok();
+    caps.add_arg("--disable-gpu").ok();
+    caps.add_arg("--no-sandbox").ok();
+    caps.add_arg("--disable-dev-shm-usage").ok();
+    caps.add_arg("--window-size=1920,1200").ok();
+    caps.add_arg("--disable-blink-features=AutomationControlled").ok();
+    caps.add_arg("--disable-web-security").ok();
+    caps.add_arg("--disable-features=VizDisplayCompositor").ok();
+    caps.add_arg("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36").ok();
+    
+    // Connect to ChromeDriver
+    let driver = match WebDriver::new("http://localhost:9515", caps).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("  ❌ Failed to connect to ChromeDriver: {}", e);
+            eprintln!("  💡 Make sure ChromeDriver is running: chromedriver --port=9515");
+            return all_products;
+        }
+    };
+    
+    println!("  ✓ Connected to ChromeDriver");
+    
+    // Create screenshots directory
+    let screenshot_dir = "/tmp/ebay_screenshots";
+    let _ = fs::create_dir_all(screenshot_dir);
+    
+    // eBay SOLD listings URLs - LH_Complete=1&LH_Sold=1 shows recently sold items
+    let urls: Vec<(&str, &str)> = vec![
+        // Phones - SOLD listings
+        ("iPhone 15", "https://www.ebay.com/sch/i.html?_nkw=iphone+15+unlocked&_sacat=9355&LH_Sold=1&LH_Complete=1&_sop=13"),
+        ("iPhone 14", "https://www.ebay.com/sch/i.html?_nkw=iphone+14+unlocked&_sacat=9355&LH_Sold=1&LH_Complete=1&_sop=13"),
+        ("iPhone 13", "https://www.ebay.com/sch/i.html?_nkw=iphone+13+unlocked&_sacat=9355&LH_Sold=1&LH_Complete=1&_sop=13"),
+        ("Galaxy S24", "https://www.ebay.com/sch/i.html?_nkw=samsung+galaxy+s24+unlocked&_sacat=9355&LH_Sold=1&LH_Complete=1&_sop=13"),
+        ("Galaxy S23", "https://www.ebay.com/sch/i.html?_nkw=samsung+galaxy+s23+unlocked&_sacat=9355&LH_Sold=1&LH_Complete=1&_sop=13"),
+        ("Pixel 8", "https://www.ebay.com/sch/i.html?_nkw=google+pixel+8+unlocked&_sacat=9355&LH_Sold=1&LH_Complete=1&_sop=13"),
+        ("Pixel 7", "https://www.ebay.com/sch/i.html?_nkw=google+pixel+7+unlocked&_sacat=9355&LH_Sold=1&LH_Complete=1&_sop=13"),
+    ];
+    
+    for (category, url) in urls.iter() {
+        println!("  🛍️ Scraping eBay {}: {}", category, url);
+        
+        if let Err(e) = driver.goto(*url).await {
+            eprintln!("    ❌ Failed to navigate to {}: {}", url, e);
+            continue;
+        }
+        
+        // Wait for page to load
+        sleep(Duration::from_secs(5)).await;
+        
+        // Scroll to load more content
+        for i in 0..6 {
+            let scroll_pos = (i + 1) * 800;
+            let _ = driver.execute(&format!("window.scrollTo(0, {})", scroll_pos), vec![]).await;
+            sleep(Duration::from_millis(600)).await;
+        }
+        
+        // Scroll back up
+        let _ = driver.execute("window.scrollTo(0, 0)", vec![]).await;
+        sleep(Duration::from_secs(1)).await;
+        
+        // Take screenshot
+        let screenshot_path = format!("{}/{}.png", screenshot_dir, category.replace(" ", "_"));
+        if let Ok(png_data) = driver.screenshot_as_png().await {
+            if fs::write(&screenshot_path, &png_data).is_ok() {
+                println!("    📸 Screenshot saved: {}", screenshot_path);
+            }
+        }
+        
+        // Extract products using JavaScript - robust selectors for eBay
+        let script = r#"
+            var products = [];
+            var seenUrls = new Set();
+            var debug = { selectors: [] };
+            
+            // Try multiple selector strategies
+            var selectorStrategies = [
+                '.srp-results .s-item',
+                'ul.srp-results li.s-item',
+                '.s-item__wrapper',
+                'li[data-viewport]',
+                '.srp-river-results li'
+            ];
+            
+            var items = [];
+            for (var s = 0; s < selectorStrategies.length; s++) {
+                var found = document.querySelectorAll(selectorStrategies[s]);
+                if (found.length > items.length) {
+                    items = found;
+                    debug.winningSelector = selectorStrategies[s];
+                }
+            }
+            
+            debug.itemsChecked = items.length;
+            
+            for (var i = 0; i < items.length && products.length < 40; i++) {
+                var item = items[i];
+                var itemText = item.innerText || '';
+                
+                // Skip placeholder/empty items
+                if (itemText.length < 30 || itemText.toLowerCase().includes('shop on ebay')) continue;
+                
+                // Get title/name - try multiple selectors
+                var titleSelectors = [
+                    '.s-item__title span[role="heading"]',
+                    '.s-item__title span',
+                    '.s-item__title',
+                    'h3.s-item__title',
+                    '[class*="item-title"]'
+                ];
+                
+                var name = '';
+                for (var t = 0; t < titleSelectors.length; t++) {
+                    var titleEl = item.querySelector(titleSelectors[t]);
+                    if (titleEl && titleEl.innerText.trim().length > 10) {
+                        name = titleEl.innerText.trim();
+                        break;
+                    }
+                }
+                
+                // Skip placeholder
+                if (!name || name.toLowerCase().includes('shop on ebay') || name.toLowerCase() === 'new listing') continue;
+                
+                // Get price - try multiple selectors
+                var priceSelectors = [
+                    '.s-item__price',
+                    '[class*="item-price"]',
+                    '.s-item__detail--primary span.BOLD'
+                ];
+                
+                var price = '';
+                for (var p = 0; p < priceSelectors.length; p++) {
+                    var priceEl = item.querySelector(priceSelectors[p]);
+                    if (priceEl) {
+                        var priceText = priceEl.innerText.trim();
+                        var priceMatch = priceText.match(/\$[\d,]+\.?\d{0,2}/);
+                        if (priceMatch) {
+                            price = priceMatch[0];
+                            break;
+                        }
+                    }
+                }
+                
+                // Get URL - must be an item link
+                var linkSelectors = [
+                    'a.s-item__link',
+                    'a[href*="/itm/"]',
+                    '.s-item__info a'
+                ];
+                
+                var href = '';
+                for (var l = 0; l < linkSelectors.length; l++) {
+                    var linkEl = item.querySelector(linkSelectors[l]);
+                    if (linkEl && linkEl.href && linkEl.href.includes('/itm/')) {
+                        href = linkEl.href;
+                        break;
+                    }
+                }
+                
+                // Validate and add product
+                if (name && name.length > 5 && href && href.includes('/itm/')) {
+                    // Clean up URL - remove tracking params
+                    var cleanUrl = href.split('?')[0];
+                    if (!seenUrls.has(cleanUrl)) {
+                        seenUrls.add(cleanUrl);
+                        products.push({
+                            name: name.substring(0, 200),
+                            price: price || 'See listing',
+                            url: cleanUrl
+                        });
+                    }
+                }
+            }
+            
+            debug.productsFound = products.length;
+            return { products: products, total: products.length, debug: debug };
+        "#;
+        
+        let products_result = driver.execute(script, vec![]).await;
+        
+        if let Ok(result_value) = products_result {
+            let json = result_value.json();
+            let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+            
+            // Debug info
+            if let Some(debug) = json.get("debug") {
+                let items_checked = debug.get("itemsChecked").and_then(|v| v.as_u64()).unwrap_or(0);
+                let winning_selector = debug.get("winningSelector").and_then(|v| v.as_str()).unwrap_or("none");
+                println!("    🔍 Found {} products (checked {} items, selector: {})", total, items_checked, winning_selector);
+            } else {
+                println!("    🔍 Found {} products", total);
+            }
+            
+            if let Some(products_arr) = json.get("products").and_then(|v| v.as_array()) {
+                let mut added_count = 0;
+                for product in products_arr {
+                    let name = product.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let price = product.get("price").and_then(|v| v.as_str()).unwrap_or("");
+                    let prod_url = product.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    if !name.is_empty() && !price.is_empty() && !prod_url.is_empty() {
+                        all_products.push(Product {
+                            name: name.to_string(),
+                            price: price.to_string(),
+                            url: prod_url.to_string(),
+                            source: "eBay".to_string(),
+                        });
+                        added_count += 1;
+                    }
+                }
+                if added_count > 0 {
+                    println!("    ✅ Added {} products from {}", added_count, category);
+                }
+            }
+        }
+        
+        sleep(Duration::from_secs(2)).await;
+    }
+    
+    // Close browser
+    if let Err(e) = driver.quit().await {
+        eprintln!("  Warning: Failed to close browser: {}", e);
+    }
+    
+    // Deduplicate
+    all_products.sort_by(|a, b| a.name.cmp(&b.name));
+    all_products.dedup_by(|a, b| a.name == b.name);
+    
+    println!("  ✓ eBay scraping complete. Found {} products", all_products.len());
+    println!("  📁 Screenshots saved to: {}", screenshot_dir);
+    
+    all_products
+}
+
 #[tokio::main]
 async fn main() {
     let client = reqwest::Client::builder()
@@ -888,7 +1405,7 @@ async fn main() {
         .build()
         .expect("Failed to create HTTP client");
 
-    println!("🛒 Product Scraper - Newegg & Swappa");
+    println!("🛒 Product Scraper - Newegg, Swappa & eBay");
     println!("⏰ Running every 1 minute. Press Ctrl+C to stop.");
     println!("📁 Tracking seen products in: {}\n", SEEN_PRODUCTS_FILE);
     
@@ -1038,8 +1555,75 @@ async fn main() {
             }
         }
 
+        sleep(Duration::from_millis(2000)).await;
+
+        // Scrape eBay
+        println!("\n\n🛍️ Scraping eBay...\n");
+        let all_ebay_products = scrape_ebay(&client).await;
+        let ebay_products = filter_new_products(all_ebay_products.clone(), &mut seen_products);
+        
+        println!("\n{}", "-".repeat(60));
+        println!("EBAY: {} total, {} NEW", all_ebay_products.len(), ebay_products.len());
+        println!("{}", "-".repeat(60));
+        
+        // Always show all scraped items with links
+        if !all_ebay_products.is_empty() {
+            println!("\n📋 ALL SCRAPED EBAY ITEMS ({}):", all_ebay_products.len());
+            for (i, product) in all_ebay_products.iter().enumerate() {
+                println!("\n{}. {}", i + 1, product.name);
+                println!("   💰 Price: {}", product.price);
+                println!("   🔗 {}", product.url);
+            }
+        }
+        
+        if ebay_products.is_empty() {
+            println!("\n  ℹ️  No new eBay products found this run");
+        } else {
+            println!("\n🆕 NEW EBAY PRODUCTS:");
+            for (i, product) in ebay_products.iter().take(15).enumerate() {
+                println!("\n{}. {}", i + 1, product.name);
+                println!("   💰 Price: {}", product.price);
+                println!("   🔗 {}", product.url);
+            }
+        }
+
+        // Price Comparison & Arbitrage Analysis
+        println!("\n\n{}", "=".repeat(60));
+        println!("💰 PRICE COMPARISON & PROFIT MARGINS");
+        println!("{}", "=".repeat(60));
+        
+        let arbitrage_opportunities = find_arbitrage_opportunities(
+            &all_newegg_products,
+            &all_swappa_products,
+            &all_ebay_products,
+        );
+        
+        display_arbitrage_opportunities(&arbitrage_opportunities);
+        
+        // Show best deals summary
+        if !arbitrage_opportunities.is_empty() {
+            println!("\n🏆 TOP 5 BEST PROFIT OPPORTUNITIES:");
+            for (i, opp) in arbitrage_opportunities.iter().take(5).enumerate() {
+                println!("   {}. ${:.2} potential profit ({:.1}%) - {}", 
+                    i + 1, opp.profit, opp.margin_percent, truncate_string(&opp.product_name, 40));
+            }
+        }
+
         // Save seen products after each run
         save_seen_products(&seen_products);
+
+        // Save data for frontend
+        let frontend_arbitrage = convert_to_arbitrage_opportunities(&arbitrage_opportunities);
+        let frontend_data = ScraperData {
+            last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            run_count,
+            newegg_products: all_newegg_products.clone(),
+            swappa_products: all_swappa_products.clone(),
+            ebay_products: all_ebay_products.clone(),
+            arbitrage_opportunities: frontend_arbitrage,
+            total_tracked: seen_products.len(),
+        };
+        save_frontend_data(&frontend_data);
 
         // Summary
         println!("\n\n{}", "=".repeat(60));
@@ -1047,7 +1631,8 @@ async fn main() {
         println!("{}", "=".repeat(60));
         println!("Newegg: {} total scraped, {} NEW", all_newegg_products.len(), newegg_products.len());
         println!("Swappa: {} total scraped, {} NEW", all_swappa_products.len(), swappa_products.len());
-        println!("Total NEW this run: {}", newegg_products.len() + swappa_products.len());
+        println!("eBay: {} total scraped, {} NEW", all_ebay_products.len(), ebay_products.len());
+        println!("Total NEW this run: {}", newegg_products.len() + swappa_products.len() + ebay_products.len());
         println!("Total products tracked: {}", seen_products.len());
         
         // Wait 1 minute before next scrape

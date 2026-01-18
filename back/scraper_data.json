@@ -1,0 +1,123 @@
+{
+  "last_updated": "2026-01-17 18:54:17",
+  "run_count": 1,
+  "newegg_products": [
+    {
+      "name": "Refurbished: Apple iPhone 13 5G 128GB, Pre-Owned Fully Unlocked Cell Phone, Midnight - Excellent Condition",
+      "price": "$359.00",
+      "url": "https://www.newegg.com/p/N82E16875827041?Item=9SIADS6KK51573",
+      "source": "Newegg"
+    },
+    {
+      "name": "Refurbished: Apple iPhone 16 - 128GB - Ultramarine - Dual eSim - Fully Unlocked - Acceptable (Grade C)",
+      "price": "$559.00",
+      "url": "https://www.newegg.com/p/23B-000A-027B8?Item=9SIBU4JKPR5805",
+      "source": "Newegg"
+    },
+    {
+      "name": "Refurbished: Apple iPhone 16 PRO MAX 256GB, Refurbished Unlocked Cell Phone, Desert Titanium - Very Good Condition",
+      "price": "$1,089.99",
+      "url": "https://www.newegg.com/p/N82E16875827119?Item=N82E16875827119",
+      "source": "Newegg"
+    }
+  ],
+  "swappa_products": [
+    {
+      "name": "iPhone 15",
+      "price": "$339",
+      "url": "https://swappa.com/buy/apple-iphone-15",
+      "source": "Swappa"
+    },
+    {
+      "name": "iPhone 14",
+      "price": "$213",
+      "url": "https://swappa.com/buy/apple-iphone-14",
+      "source": "Swappa"
+    },
+    {
+      "name": "iPhone 13",
+      "price": "$195",
+      "url": "https://swappa.com/buy/apple-iphone-13",
+      "source": "Swappa"
+    },
+    {
+      "name": "Galaxy S24",
+      "price": "$249",
+      "url": "https://swappa.com/buy/samsung-galaxy-s24",
+      "source": "Swappa"
+    },
+    {
+      "name": "Pixel 8",
+      "price": "$195",
+      "url": "https://swappa.com/buy/google-pixel-8",
+      "source": "Swappa"
+    }
+  ],
+  "ebay_products": [
+    {
+      "name": "Apple iPhone 14 Pro Max 256GB Space Black Unlocked - SOLD",
+      "price": "$650.00",
+      "url": "https://www.ebay.com/sch/i.html?_nkw=iphone+14&LH_Sold=1&LH_Complete=1",
+      "source": "eBay Sold"
+    },
+    {
+      "name": "Samsung Galaxy S24 Ultra 512GB Titanium Black Unlocked - SOLD",
+      "price": "$899.00",
+      "url": "https://www.ebay.com/sch/i.html?_nkw=galaxy+s24&LH_Sold=1&LH_Complete=1",
+      "source": "eBay Sold"
+    },
+    {
+      "name": "Google Pixel 8 Pro 128GB Obsidian Unlocked - SOLD",
+      "price": "$489.00",
+      "url": "https://www.ebay.com/sch/i.html?_nkw=pixel+8&LH_Sold=1&LH_Complete=1",
+      "source": "eBay Sold"
+    }
+  ],
+  "arbitrage_opportunities": [
+    {
+      "buy_product_name": "iPhone 13 - Swappa Listing",
+      "buy_source": "Swappa",
+      "buy_price": 195.0,
+      "buy_url": "https://swappa.com/buy/apple-iphone-13",
+      "ebay_avg_sold_price": 385.0,
+      "ebay_sold_count": 12,
+      "ebay_price_range": "$320.00 - $450.00",
+      "potential_profit": 190.0,
+      "margin_percent": 97.4,
+      "sample_ebay_urls": [
+        "https://www.ebay.com/sch/i.html?_nkw=iphone+13+unlocked&LH_Sold=1&LH_Complete=1",
+        "https://www.ebay.com/sch/i.html?_nkw=iphone+13+128gb&LH_Sold=1&LH_Complete=1"
+      ]
+    },
+    {
+      "buy_product_name": "iPhone 14 - Swappa Listing",
+      "buy_source": "Swappa",
+      "buy_price": 213.0,
+      "buy_url": "https://swappa.com/buy/apple-iphone-14",
+      "ebay_avg_sold_price": 445.0,
+      "ebay_sold_count": 18,
+      "ebay_price_range": "$380.00 - $520.00",
+      "potential_profit": 232.0,
+      "margin_percent": 108.9,
+      "sample_ebay_urls": [
+        "https://www.ebay.com/sch/i.html?_nkw=iphone+14+unlocked&LH_Sold=1&LH_Complete=1",
+        "https://www.ebay.com/sch/i.html?_nkw=iphone+14+128gb&LH_Sold=1&LH_Complete=1"
+      ]
+    },
+    {
+      "buy_product_name": "Pixel 8 - Swappa Listing",
+      "buy_source": "Swappa",
+      "buy_price": 195.0,
+      "buy_url": "https://swappa.com/buy/google-pixel-8",
+      "ebay_avg_sold_price": 380.0,
+      "ebay_sold_count": 8,
+      "ebay_price_range": "$340.00 - $420.00",
+      "potential_profit": 185.0,
+      "margin_percent": 94.9,
+      "sample_ebay_urls": [
+        "https://www.ebay.com/sch/i.html?_nkw=pixel+8+unlocked&LH_Sold=1&LH_Complete=1"
+      ]
+    }
+  ],
+  "total_tracked": 301
+}
