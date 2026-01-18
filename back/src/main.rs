@@ -31,7 +31,37 @@ struct ArbitrageOpportunity {
     sample_ebay_urls: Vec<String>,
 }
 
-// Structure for frontend data export
+// Structure for individual product with eBay comparison
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProductWithComparison {
+    name: String,
+    price: String,
+    price_numeric: f64,
+    url: String,
+    source: String,
+    ebay_avg_sold: Option<f64>,
+    ebay_sold_count: Option<usize>,
+    ebay_price_range: Option<String>,
+    potential_profit: Option<f64>,
+    margin_percent: Option<f64>,
+}
+
+// Structure for a single run snapshot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RunSnapshot {
+    run_id: u32,
+    timestamp: String,
+    swappa_products: Vec<ProductWithComparison>,
+    newegg_products: Vec<ProductWithComparison>,
+    ebay_sold_products: Vec<Product>,
+    arbitrage_opportunities: Vec<ArbitrageOpportunity>,
+    total_swappa: usize,
+    total_newegg: usize,
+    total_ebay_sold: usize,
+    best_opportunity: Option<ArbitrageOpportunity>,
+}
+
+// Structure for frontend data export with history
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScraperData {
     last_updated: String,
@@ -41,11 +71,22 @@ struct ScraperData {
     ebay_products: Vec<Product>,
     arbitrage_opportunities: Vec<ArbitrageOpportunity>,
     total_tracked: usize,
+    // New: Run history
+    run_history: Vec<RunSnapshot>,
 }
 
 // File paths
 const SEEN_PRODUCTS_FILE: &str = "seen_products.json";
 const FRONTEND_DATA_FILE: &str = "scraper_data.json";
+const MAX_HISTORY_RUNS: usize = 20; // Keep last 20 runs
+
+// Load existing frontend data (for history)
+fn load_frontend_data() -> Option<ScraperData> {
+    match fs::read_to_string(FRONTEND_DATA_FILE) {
+        Ok(content) => serde_json::from_str(&content).ok(),
+        Err(_) => None,
+    }
+}
 
 // Save data for frontend
 fn save_frontend_data(data: &ScraperData) {
@@ -56,6 +97,63 @@ fn save_frontend_data(data: &ScraperData) {
             println!("📁 Frontend data saved to {}", FRONTEND_DATA_FILE);
         }
     }
+}
+
+// Create products with eBay comparison data
+fn create_products_with_comparison(
+    swappa_products: &[Product],
+    ebay_sold: &[Product],
+) -> Vec<ProductWithComparison> {
+    let mut products_with_comp = Vec::new();
+    
+    for product in swappa_products {
+        let price_numeric = parse_price(&product.price).unwrap_or(0.0);
+        
+        // Find similar eBay sold items
+        let mut similar_sold: Vec<f64> = Vec::new();
+        for sold in ebay_sold {
+            let score = similarity_score(product, sold);
+            if score >= 40.0 {
+                if let Some(sold_price) = parse_price(&sold.price) {
+                    if sold_price > 50.0 {
+                        similar_sold.push(sold_price);
+                    }
+                }
+            }
+        }
+        
+        let (ebay_avg, ebay_count, ebay_range, profit, margin) = if similar_sold.len() >= 2 {
+            let avg = similar_sold.iter().sum::<f64>() / similar_sold.len() as f64;
+            let min = similar_sold.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = similar_sold.iter().cloned().fold(0.0, f64::max);
+            let profit = avg - price_numeric;
+            let margin = if price_numeric > 0.0 { (profit / price_numeric) * 100.0 } else { 0.0 };
+            (
+                Some(avg),
+                Some(similar_sold.len()),
+                Some(format!("${:.2} - ${:.2}", min, max)),
+                Some(profit),
+                Some(margin),
+            )
+        } else {
+            (None, None, None, None, None)
+        };
+        
+        products_with_comp.push(ProductWithComparison {
+            name: product.name.clone(),
+            price: product.price.clone(),
+            price_numeric,
+            url: product.url.clone(),
+            source: product.source.clone(),
+            ebay_avg_sold: ebay_avg,
+            ebay_sold_count: ebay_count,
+            ebay_price_range: ebay_range,
+            potential_profit: profit,
+            margin_percent: margin,
+        });
+    }
+    
+    products_with_comp
 }
 
 // Convert PriceComparison to ArbitrageOpportunity for frontend export
@@ -82,9 +180,28 @@ fn convert_to_arbitrage_opportunities(comparisons: &[PriceComparison]) -> Vec<Ar
     opportunities
 }
 
-// Generate a unique key for a product (using source + name + price)
+// Generate a unique key for a product (using URL as primary key for deduplication)
 fn product_key(product: &Product) -> String {
-    format!("{}|{}|{}", product.source, product.name, product.price)
+    // Use URL as the primary key - this ensures same listing isn't duplicated
+    // Strip query params for cleaner comparison
+    let url_clean = product.url.split('?').next().unwrap_or(&product.url);
+    format!("{}|{}", product.source, url_clean)
+}
+
+// Deduplicate products by URL
+fn deduplicate_products(products: Vec<Product>) -> Vec<Product> {
+    let mut seen_urls: HashSet<String> = HashSet::new();
+    let mut unique_products = Vec::new();
+    
+    for product in products {
+        let url_clean = product.url.split('?').next().unwrap_or(&product.url).to_string();
+        if !seen_urls.contains(&url_clean) {
+            seen_urls.insert(url_clean);
+            unique_products.push(product);
+        }
+    }
+    
+    unique_products
 }
 
 // Load seen products from JSON file
@@ -1233,105 +1350,57 @@ async fn scrape_ebay(_client: &reqwest::Client) -> Vec<Product> {
             }
         }
         
-        // Extract products using JavaScript - robust selectors for eBay
+        // Extract products using JavaScript - updated selectors for eBay 2026
         let script = r#"
             var products = [];
             var seenUrls = new Set();
             var debug = { selectors: [] };
             
-            // Try multiple selector strategies
-            var selectorStrategies = [
-                '.srp-results .s-item',
-                'ul.srp-results li.s-item',
-                '.s-item__wrapper',
-                'li[data-viewport]',
-                '.srp-river-results li'
-            ];
-            
-            var items = [];
-            for (var s = 0; s < selectorStrategies.length; s++) {
-                var found = document.querySelectorAll(selectorStrategies[s]);
-                if (found.length > items.length) {
-                    items = found;
-                    debug.winningSelector = selectorStrategies[s];
-                }
-            }
-            
+            // Updated selector for eBay's new s-card structure
+            var items = document.querySelectorAll('ul.srp-results li.s-card');
             debug.itemsChecked = items.length;
+            debug.winningSelector = 'ul.srp-results li.s-card';
             
-            for (var i = 0; i < items.length && products.length < 40; i++) {
+            for (var i = 0; i < items.length && products.length < 50; i++) {
                 var item = items[i];
-                var itemText = item.innerText || '';
                 
-                // Skip placeholder/empty items
-                if (itemText.length < 30 || itemText.toLowerCase().includes('shop on ebay')) continue;
+                // Get title from s-card__title
+                var titleEl = item.querySelector('.s-card__title span');
+                var name = titleEl ? titleEl.innerText.trim() : '';
                 
-                // Get title/name - try multiple selectors
-                var titleSelectors = [
-                    '.s-item__title span[role="heading"]',
-                    '.s-item__title span',
-                    '.s-item__title',
-                    'h3.s-item__title',
-                    '[class*="item-title"]'
-                ];
+                // Clean up title - remove "NEW LISTING" prefix
+                name = name.replace(/^NEW LISTING/i, '').trim();
                 
-                var name = '';
-                for (var t = 0; t < titleSelectors.length; t++) {
-                    var titleEl = item.querySelector(titleSelectors[t]);
-                    if (titleEl && titleEl.innerText.trim().length > 10) {
-                        name = titleEl.innerText.trim();
-                        break;
-                    }
-                }
+                // Skip invalid names
+                if (!name || name.length < 10 || name.toLowerCase().includes('shop on ebay')) continue;
                 
-                // Skip placeholder
-                if (!name || name.toLowerCase().includes('shop on ebay') || name.toLowerCase() === 'new listing') continue;
-                
-                // Get price - try multiple selectors
-                var priceSelectors = [
-                    '.s-item__price',
-                    '[class*="item-price"]',
-                    '.s-item__detail--primary span.BOLD'
-                ];
-                
+                // Get price from s-card__price
+                var priceEl = item.querySelector('.s-card__price');
                 var price = '';
-                for (var p = 0; p < priceSelectors.length; p++) {
-                    var priceEl = item.querySelector(priceSelectors[p]);
-                    if (priceEl) {
-                        var priceText = priceEl.innerText.trim();
-                        var priceMatch = priceText.match(/\$[\d,]+\.?\d{0,2}/);
-                        if (priceMatch) {
-                            price = priceMatch[0];
-                            break;
-                        }
+                if (priceEl) {
+                    var priceText = priceEl.innerText.trim();
+                    var priceMatch = priceText.match(/\$[\d,]+\.?\d{0,2}/);
+                    if (priceMatch) {
+                        price = priceMatch[0];
                     }
                 }
                 
-                // Get URL - must be an item link
-                var linkSelectors = [
-                    'a.s-item__link',
-                    'a[href*="/itm/"]',
-                    '.s-item__info a'
-                ];
-                
-                var href = '';
-                for (var l = 0; l < linkSelectors.length; l++) {
-                    var linkEl = item.querySelector(linkSelectors[l]);
-                    if (linkEl && linkEl.href && linkEl.href.includes('/itm/')) {
-                        href = linkEl.href;
-                        break;
-                    }
+                // Get URL from s-card__link with /itm/
+                var linkEl = item.querySelector('a.s-card__link[href*="/itm/"]');
+                if (!linkEl) {
+                    linkEl = item.querySelector('a[href*="/itm/"]');
                 }
+                var href = linkEl ? linkEl.href : '';
                 
                 // Validate and add product
-                if (name && name.length > 5 && href && href.includes('/itm/')) {
+                if (name && name.length > 5 && price && href && href.includes('/itm/')) {
                     // Clean up URL - remove tracking params
                     var cleanUrl = href.split('?')[0];
                     if (!seenUrls.has(cleanUrl)) {
                         seenUrls.add(cleanUrl);
                         products.push({
                             name: name.substring(0, 200),
-                            price: price || 'See listing',
+                            price: price,
                             url: cleanUrl
                         });
                     }
@@ -1425,7 +1494,7 @@ async fn main() {
 
         // Scrape Newegg
         println!("\n📦 Scraping Newegg...\n");
-        let all_newegg_products = scrape_newegg(&client).await;
+        let all_newegg_products = deduplicate_products(scrape_newegg(&client).await);
         let newegg_products = filter_new_products(all_newegg_products.clone(), &mut seen_products);
         
         println!("\n{}", "-".repeat(60));
@@ -1492,7 +1561,7 @@ async fn main() {
 
         // Scrape Swappa
         println!("\n\n📱 Scraping Swappa...\n");
-        let all_swappa_products = scrape_swappa(&client).await;
+        let all_swappa_products = deduplicate_products(scrape_swappa(&client).await);
         let swappa_products = filter_new_products(all_swappa_products.clone(), &mut seen_products);
         
         println!("\n{}", "-".repeat(60));
@@ -1559,7 +1628,7 @@ async fn main() {
 
         // Scrape eBay
         println!("\n\n🛍️ Scraping eBay...\n");
-        let all_ebay_products = scrape_ebay(&client).await;
+        let all_ebay_products = deduplicate_products(scrape_ebay(&client).await);
         let ebay_products = filter_new_products(all_ebay_products.clone(), &mut seen_products);
         
         println!("\n{}", "-".repeat(60));
@@ -1612,8 +1681,40 @@ async fn main() {
         // Save seen products after each run
         save_seen_products(&seen_products);
 
-        // Save data for frontend
+        // Save data for frontend with run history
         let frontend_arbitrage = convert_to_arbitrage_opportunities(&arbitrage_opportunities);
+        let swappa_with_comparison = create_products_with_comparison(&all_swappa_products, &all_ebay_products);
+        let newegg_with_comparison = create_products_with_comparison(&all_newegg_products, &all_ebay_products);
+        
+        // Create current run snapshot
+        let current_run = RunSnapshot {
+            run_id: run_count,
+            timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            swappa_products: swappa_with_comparison,
+            newegg_products: newegg_with_comparison,
+            ebay_sold_products: all_ebay_products.clone(),
+            arbitrage_opportunities: frontend_arbitrage.clone(),
+            total_swappa: all_swappa_products.len(),
+            total_newegg: all_newegg_products.len(),
+            total_ebay_sold: all_ebay_products.len(),
+            best_opportunity: frontend_arbitrage.first().cloned(),
+        };
+        
+        // Load existing history and append
+        let mut run_history = if let Some(existing) = load_frontend_data() {
+            existing.run_history
+        } else {
+            Vec::new()
+        };
+        
+        run_history.push(current_run);
+        
+        // Keep only last MAX_HISTORY_RUNS
+        if run_history.len() > MAX_HISTORY_RUNS {
+            let skip_count = run_history.len() - MAX_HISTORY_RUNS;
+            run_history = run_history.into_iter().skip(skip_count).collect();
+        }
+        
         let frontend_data = ScraperData {
             last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             run_count,
@@ -1622,6 +1723,7 @@ async fn main() {
             ebay_products: all_ebay_products.clone(),
             arbitrage_opportunities: frontend_arbitrage,
             total_tracked: seen_products.len(),
+            run_history,
         };
         save_frontend_data(&frontend_data);
 
