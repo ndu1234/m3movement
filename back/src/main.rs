@@ -21,13 +21,13 @@ struct Product {
 struct ArbitrageOpportunity {
     buy_product_name: String,
     buy_source: String,
-    buy_price: f64,
+    buy_price: f32,
     buy_url: String,
-    ebay_avg_sold_price: f64,
+    ebay_avg_sold_price: f32,
     ebay_sold_count: usize,
     ebay_price_range: String,
-    potential_profit: f64,
-    margin_percent: f64,
+    potential_profit: f32,
+    margin_percent: f32,
     sample_ebay_urls: Vec<String>,
 }
 
@@ -236,8 +236,8 @@ fn filter_new_products(products: Vec<Product>, seen: &mut HashSet<String>) -> Ve
     new_products
 }
 
-// Parse price string to f64
-fn parse_price(price_str: &str) -> Option<f64> {
+// Parse price string to f32
+fn parse_price(price_str: &str) -> Option<f32> {
     // Remove currency symbols, commas, and extra whitespace
     let cleaned: String = price_str
         .replace('$', "")
@@ -248,7 +248,7 @@ fn parse_price(price_str: &str) -> Option<f64> {
         .take_while(|c| c.is_digit(10) || *c == '.')
         .collect();
     
-    cleaned.parse::<f64>().ok()
+    cleaned.parse::<f32>().ok()
 }
 
 // Extract key product identifiers from name (model numbers, brand, etc.)
@@ -290,7 +290,7 @@ fn extract_keywords(name: &str) -> Vec<String> {
 }
 
 // Calculate similarity score between two products
-fn similarity_score(p1: &Product, p2: &Product) -> f64 {
+fn similarity_score(p1: &Product, p2: &Product) -> f32 {
     let kw1 = extract_keywords(&p1.name);
     let kw2 = extract_keywords(&p2.name);
     
@@ -322,22 +322,22 @@ fn similarity_score(p1: &Product, p2: &Product) -> f64 {
     }
     
     // Calculate score based on keyword matches
-    let max_keywords = kw1.len().max(kw2.len()) as f64;
-    (matches as f64 / max_keywords) * 100.0
+    let max_keywords = kw1.len().max(kw2.len()) as f32;
+    (matches as f32 / max_keywords) * 100.0
 }
 
 #[derive(Debug, Clone)]
 struct PriceComparison {
     product_name: String,
     source_product: Product,
-    source_price: f64,
-    ebay_avg_sold: f64,
+    source_price: f32,
+    ebay_avg_sold: f32,
     ebay_sold_count: usize,
-    ebay_min_price: f64,
-    ebay_max_price: f64,
+    ebay_min_price: f32,
+    ebay_max_price: f32,
     sample_ebay_urls: Vec<String>,
-    profit: f64,
-    margin_percent: f64,
+    profit: f32,
+    margin_percent: f32,
 }
 
 // Find arbitrage opportunities by comparing Swappa prices to eBay SOLD averages
@@ -356,7 +356,7 @@ fn find_arbitrage_opportunities(
             }
             
             // Find similar eBay SOLD items and calculate average
-            let mut similar_sold: Vec<(f64, String)> = Vec::new();
+            let mut similar_sold: Vec<(f32, String)> = Vec::new();
             
             for sold_product in ebay_sold {
                 let score = similarity_score(buy_product, sold_product);
@@ -371,10 +371,10 @@ fn find_arbitrage_opportunities(
             
             // Need at least 2 sold items to calculate meaningful average
             if similar_sold.len() >= 2 {
-                let prices: Vec<f64> = similar_sold.iter().map(|(p, _)| *p).collect();
-                let avg_sold = prices.iter().sum::<f64>() / prices.len() as f64;
-                let min_price = prices.iter().cloned().fold(f64::INFINITY, f64::min);
-                let max_price = prices.iter().cloned().fold(0.0, f64::max);
+                let prices: Vec<f32> = similar_sold.iter().map(|(p, _)| *p).collect();
+                let avg_sold = prices.iter().sum::<f32>() / prices.len() as f32;
+                let min_price = prices.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max_price = prices.iter().cloned().fold(0.0, f32::max);
                 
                 // Calculate profit based on average sold price
                 let profit = avg_sold - buy_price;
